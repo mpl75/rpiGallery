@@ -433,6 +433,122 @@ body {
     opacity: 0.5;
 }
 
+/* Share button */
+.btn-share {
+    background: var(--color-card-hover) !important;
+    color: var(--color-text) !important;
+}
+
+/* Share dialog */
+.share-dialog {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0, 0, 0, 0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 3000;
+}
+
+.share-dialog-content {
+    background: var(--color-card);
+    padding: 24px;
+    border-radius: 12px;
+    max-width: 480px;
+    width: 90vw;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.share-dialog-content p {
+    font-size: 1.167rem;
+    color: var(--color-text);
+}
+
+.share-days {
+    display: flex;
+    gap: 8px;
+}
+
+.share-days-btn {
+    flex: 1;
+    padding: 8px;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    background: var(--color-bg);
+    color: var(--color-primary);
+    font-size: 1rem;
+    cursor: pointer;
+}
+
+.share-days-btn:hover {
+    background: var(--color-card-hover);
+}
+
+#share-result {
+    display: flex;
+    gap: 8px;
+}
+
+#share-url {
+    flex: 1;
+    padding: 8px;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-size: 1rem;
+}
+
+#share-result button {
+    padding: 8px 14px;
+    border: none;
+    border-radius: 6px;
+    background: var(--color-primary);
+    color: var(--color-bg);
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.share-close {
+    padding: 8px;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    background: none;
+    color: var(--color-muted);
+    font-size: 1rem;
+    cursor: pointer;
+}
+
+/* Folder navigation (prev/next) */
+.folder-nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 0;
+    margin-top: 20px;
+    border-top: 1px solid var(--color-border);
+}
+
+.folder-nav-link {
+    color: var(--color-primary);
+    text-decoration: none;
+    font-size: 1rem;
+    padding: 8px 14px;
+    background: var(--color-card);
+    border-radius: 6px;
+}
+
+.folder-nav-link:hover {
+    background: var(--color-card-hover);
+}
+
 /* Empty state */
 .empty {
     text-align: center;

@@ -276,6 +276,9 @@ foreach ($allFolders as $relPath) {
             $dataChanged = true;
             $filesDone++;
 
+            // Save after each file so progress survives a crash
+            file_put_contents($dataFile, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+
             writeStatus([
                 'state' => 'running',
                 'totalFolders' => $totalFolders,

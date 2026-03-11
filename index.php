@@ -16,6 +16,43 @@ $imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
 $videoExts = [];
 $allExts = array_merge($imageExts, $videoExts);
 
+// --- Shares ---
+$sharesFile = __DIR__ . '/shares.json';
+function loadShares() {
+    global $sharesFile;
+    if (!file_exists($sharesFile)) return [];
+    $shares = json_decode(file_get_contents($sharesFile), true) ?: [];
+    // Purge expired
+    $now = time();
+    $cleaned = array_filter($shares, fn($s) => $s['expires'] > $now);
+    if (count($cleaned) !== count($shares)) {
+        file_put_contents($sharesFile, json_encode($cleaned, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+    }
+    return $cleaned;
+}
+
+// --- Handle shared access: /gallery/s/HASH ---
+$path = isset($_GET['path']) ? $_GET['path'] : '';
+$isSharedAccess = false;
+$sharedPath = null;
+
+if (preg_match('#^s/([a-f0-9]+)(/.*)?$#', $path, $m)) {
+    $shareHash = $m[1];
+    $shares = loadShares();
+    if (isset($shares[$shareHash])) {
+        $isSharedAccess = true;
+        $sharedPath = $shares[$shareHash]['path'];
+        // Allow subpath within shared folder
+        $subPath = isset($m[2]) ? trim($m[2], '/') : '';
+        $_GET['path'] = $sharedPath . ($subPath ? '/' . $subPath : '');
+        // Skip auth
+    } else {
+        http_response_code(404);
+        echo "Odkaz vypršel nebo neexistuje.";
+        exit;
+    }
+}
+
 // --- Crawler control API (AJAX) ---
 if (isset($_GET['action']) && !empty($_SESSION['authenticated'])) {
     header('Content-Type: application/json');
@@ -40,6 +77,23 @@ if (isset($_GET['action']) && !empty($_SESSION['authenticated'])) {
         case 'crawler-stop':
             file_put_contents(__DIR__ . '/crawler.stop', '1');
             echo json_encode(['ok' => true]);
+            exit;
+
+        case 'share-create':
+            $sharePath = $_GET['folder'] ?? '';
+            $sharePath = str_replace('..', '', trim($sharePath, '/'));
+            $days = (int)($_GET['days'] ?? 30);
+            if ($days < 1) $days = 30;
+            $hash = bin2hex(random_bytes(16));
+            $shares = loadShares();
+            $shares[$hash] = [
+                'path' => $sharePath,
+                'expires' => time() + ($days * 86400),
+                'created' => date('Y-m-d H:i:s'),
+            ];
+            file_put_contents($sharesFile, json_encode($shares, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+            $url = 'https://' . $_SERVER['HTTP_HOST'] . '/gallery/s/' . $hash;
+            echo json_encode(['ok' => true, 'url' => $url, 'days' => $days]);
             exit;
 
         case 'crawler-status':
@@ -84,7 +138,7 @@ if (isset($_POST['login_user'], $_POST['login_pass'])) {
     }
 }
 
-if (empty($_SESSION['authenticated'])) {
+if (!$isSharedAccess && empty($_SESSION['authenticated'])) {
     showLoginForm($loginError ?? false);
     exit;
 }
@@ -109,6 +163,7 @@ function formatDate($dt) {
 
 $fullPath = $rootGallery . ($path ? '/' . $path : '');
 $baseUrl = '/gallery';
+$shareBaseUrl = $isSharedAccess ? '/gallery/s/' . $shareHash : null;
 
 // If path points to a file, serve the fullsize preview
 if (is_file($fullPath)) {
@@ -196,6 +251,45 @@ if ($path) {
     }
 }
 
+// Find sibling folders (prev/next)
+$prevFolder = null;
+$nextFolder = null;
+if ($path) {
+    $currentName = basename($path);
+    $parentPath = dirname($path);
+    if ($parentPath === '.') $parentPath = '';
+    $parentFullPath = $rootGallery . ($parentPath ? '/' . $parentPath : '');
+
+    $siblings = [];
+    $parentEntries = @scandir($parentFullPath);
+    if ($parentEntries) {
+        foreach ($parentEntries as $e) {
+            if ($e[0] === '.') continue;
+            if (is_dir($parentFullPath . '/' . $e)) {
+                $siblings[] = $e;
+            }
+        }
+        sort($siblings, SORT_LOCALE_STRING);
+        $idx = array_search($currentName, $siblings);
+        if ($idx !== false) {
+            if ($idx > 0) {
+                $prevName = $siblings[$idx - 1];
+                $prevFolder = [
+                    'name' => $prevName,
+                    'url' => $baseUrl . '/' . encodePath($parentPath ? $parentPath . '/' . $prevName : $prevName),
+                ];
+            }
+            if ($idx < count($siblings) - 1) {
+                $nextName = $siblings[$idx + 1];
+                $nextFolder = [
+                    'name' => $nextName,
+                    'url' => $baseUrl . '/' . encodePath($parentPath ? $parentPath . '/' . $nextName : $nextName),
+                ];
+            }
+        }
+    }
+}
+
 // Check crawler status
 $crawlerRunning = false;
 $pidFile = __DIR__ . '/crawler.pid';
@@ -219,6 +313,11 @@ function showLoginForm($error = false) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Galerie — Přihlášení</title>
+    <link rel="icon" type="image/svg+xml" href="/rpiGallery/favicon.svg">
+    <link rel="manifest" href="/rpiGallery/manifest.json">
+    <meta name="theme-color" content="#1a1a2e">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="stylesheet" href="/rpiGallery/gallery.css">
 </head>
 <body>
@@ -246,6 +345,11 @@ function showLoginForm($error = false) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Galerie<?= $path ? ' — ' . htmlspecialchars($path) : '' ?></title>
+    <link rel="icon" type="image/svg+xml" href="/rpiGallery/favicon.svg">
+    <link rel="manifest" href="/rpiGallery/manifest.json">
+    <meta name="theme-color" content="#1a1a2e">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="stylesheet" href="/rpiGallery/gallery.css">
 </head>
 <body>
@@ -259,17 +363,41 @@ function showLoginForm($error = false) {
             <span class="current"><?= htmlspecialchars($bc['name']) ?></span>
         <?php endif; ?>
     <?php endforeach; ?>
+<?php if (!$isSharedAccess): ?>
     <a href="?logout" class="logout-link">Odhlásit</a>
+<?php endif; ?>
 </nav>
 
+<?php if (!$isSharedAccess): ?>
 <!-- Crawler control -->
 <div id="crawler-bar" class="crawler-bar">
     <div id="crawler-status"></div>
     <div class="crawler-buttons">
+        <?php if ($path && $mediaFiles): ?>
+            <button onclick="shareFolder()" class="btn-share">Sdílet</button>
+        <?php endif; ?>
         <button id="btn-start" onclick="crawlerAction('start')">Aktualizovat galerii</button>
         <button id="btn-stop" onclick="crawlerAction('stop')" style="display:none">Zastavit</button>
     </div>
 </div>
+
+<!-- Share dialog -->
+<div id="share-dialog" class="share-dialog" style="display:none">
+    <div class="share-dialog-content">
+        <p>Sdílet složku <strong><?= htmlspecialchars(basename($path)) ?></strong></p>
+        <div class="share-days">
+            <button onclick="createShare(7)" class="share-days-btn">7 dní</button>
+            <button onclick="createShare(30)" class="share-days-btn">30 dní</button>
+            <button onclick="createShare(90)" class="share-days-btn">90 dní</button>
+        </div>
+        <div id="share-result" style="display:none">
+            <input type="text" id="share-url" readonly>
+            <button onclick="copyShareUrl()">Kopírovat</button>
+        </div>
+        <button onclick="document.getElementById('share-dialog').style.display='none'" class="share-close">Zavřít</button>
+    </div>
+</div>
+<?php endif; ?>
 
 <?php if ($folders): ?>
 <section class="folders">
@@ -310,7 +438,7 @@ function showLoginForm($error = false) {
         $dateTaken = $entry['dateTaken'] ?? '';
         $camera = $exif['Camera'] ?? '';
         $owner = $entry['owner'] ?? null;
-        $fullUrl = $baseUrl . '/' . encodePath($path ? $path . '/' . $name : $name);
+        $fullUrl = ($shareBaseUrl ?? $baseUrl) . '/' . encodePath($isSharedAccess ? $name : ($path ? $path . '/' . $name : $name));
         $mapped = $entry['mappedName'] ?? $name;
         $thumbUrl = $thumbsUrl . '/' . encodePath($path ? $path . '/' . $mapped : $mapped);
     ?>
@@ -332,6 +460,19 @@ function showLoginForm($error = false) {
         $lbIndex++;
     endforeach; ?>
 </section>
+<?php endif; ?>
+
+<?php if (!$isSharedAccess && ($prevFolder || $nextFolder)): ?>
+<nav class="folder-nav">
+    <?php if ($prevFolder): ?>
+        <a href="<?= htmlspecialchars($prevFolder['url']) ?>" class="folder-nav-link folder-nav-prev">&laquo; <?= htmlspecialchars($prevFolder['name']) ?></a>
+    <?php else: ?>
+        <span></span>
+    <?php endif; ?>
+    <?php if ($nextFolder): ?>
+        <a href="<?= htmlspecialchars($nextFolder['url']) ?>" class="folder-nav-link folder-nav-next"><?= htmlspecialchars($nextFolder['name']) ?> &raquo;</a>
+    <?php endif; ?>
+</nav>
 <?php endif; ?>
 
 <?php if (!$folders && !$mediaFiles): ?>
@@ -369,11 +510,20 @@ function closeLightbox(e) {
     document.getElementById('lb-img').src = '';
 }
 
+const prevFolderUrl = <?= json_encode(!$isSharedAccess && $prevFolder ? $prevFolder['url'] : null) ?>;
+const nextFolderUrl = <?= json_encode(!$isSharedAccess && $nextFolder ? $nextFolder['url'] : null) ?>;
+
 function navigateLightbox(e, dir) {
     if (e) e.stopPropagation();
     currentIdx += dir;
-    if (currentIdx < 0) currentIdx = cards.length - 1;
-    if (currentIdx >= cards.length) currentIdx = 0;
+    if (currentIdx < 0) {
+        if (prevFolderUrl) { window.location.href = prevFolderUrl; return; }
+        currentIdx = cards.length - 1;
+    }
+    if (currentIdx >= cards.length) {
+        if (nextFolderUrl) { window.location.href = nextFolderUrl; return; }
+        currentIdx = 0;
+    }
     showImage();
 }
 
@@ -474,6 +624,29 @@ function updateCrawlerStatus() {
 
 // Check on load
 updateCrawlerStatus();
+
+// Share
+function shareFolder() {
+    document.getElementById('share-dialog').style.display = 'flex';
+    document.getElementById('share-result').style.display = 'none';
+}
+
+function createShare(days) {
+    fetch('?action=share-create&folder=<?= rawurlencode($path) ?>&days=' + days)
+        .then(r => r.json())
+        .then(d => {
+            if (d.ok) {
+                document.getElementById('share-url').value = d.url;
+                document.getElementById('share-result').style.display = 'flex';
+            }
+        });
+}
+
+function copyShareUrl() {
+    const input = document.getElementById('share-url');
+    input.select();
+    navigator.clipboard.writeText(input.value);
+}
 </script>
 
 </body>

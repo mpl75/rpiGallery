@@ -1,6 +1,7 @@
 crawler.pid
 crawler.stop
 crawler.json
+shares.json
 config.json
 thumbnails/
 fullsize/
