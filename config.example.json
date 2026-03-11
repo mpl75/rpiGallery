@@ -1,0 +1,16 @@
+{
+    "rootGallery": "/path/to/your/photos",
+    "thumbnailsFolder": "/var/www/html/rpiGallery/thumbnails",
+    "thumbnailsUrl": "/rpiGallery/thumbnails",
+    "fullsizeFolder": "/var/www/html/rpiGallery/fullsize",
+    "fullsizeUrl": "/rpiGallery/fullsize",
+    "thumbnailWidth": 600,
+    "thumbnailHeight": 400,
+    "thumbnailQuality": 80,
+    "fullWidth": 1920,
+    "fullHeight": 1080,
+    "fullQuality": 90,
+    "users": [
+        {"user": "you@example.com", "password": "$2y$10$your-bcrypt-hash-here", "name": "Your Name", "initials": "YN", "uid": 1000}
+    ]
+}
