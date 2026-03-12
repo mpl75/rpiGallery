@@ -25,8 +25,7 @@ body {
     background: var(--color-bg);
     color: var(--color-text);
     padding: 20px;
-    max-width: 1400px;
-    margin: 0 auto;
+    margin: 0;
 }
 
 /* Login */
@@ -168,23 +167,18 @@ body {
 .images {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-    gap: 12px;
+    gap: 0;
 }
 
 .image-card {
-    background: var(--color-card);
-    border-radius: 8px;
     overflow: hidden;
-    transition: transform 0.2s;
-}
-
-.image-card:hover {
-    transform: scale(1.02);
+    position: relative;
+    cursor: pointer;
+    padding: 1px;
 }
 
 .thumb-wrap {
     position: relative;
-    cursor: pointer;
 }
 
 .image-card img {
@@ -196,7 +190,7 @@ body {
 
 .video-badge {
     position: absolute;
-    bottom: 8px;
+    top: 8px;
     right: 8px;
     background: rgba(0, 0, 0, 0.7);
     color: #fff;
@@ -206,29 +200,28 @@ body {
 }
 
 .image-info {
-    padding: 8px 10px;
+    position: absolute;
+    bottom: 6px;
+    left: 6px;
+    background: rgba(0, 0, 0, 0.6);
+    font-size: 0.833rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    pointer-events: none;
     display: flex;
     flex-direction: column;
-    gap: 2px;
 }
 
 .image-name {
-    font-size: 1rem;
-    color: #aaa;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    display: none;
 }
 
 .image-date {
-    font-size: 1rem;
     color: var(--color-primary);
 }
 
 .image-camera {
-    font-size: 1rem;
-    color: var(--color-muted);
-    opacity: 0.7;
+    color: #ccc;
 }
 
 /* Loading overlay */
@@ -286,7 +279,7 @@ body {
     left: 0;
     width: 100vw;
     height: 100vh;
-    background: rgba(0, 0, 0, 0.95);
+    background: #000;
     z-index: 2000;
     align-items: center;
     justify-content: center;
@@ -297,31 +290,38 @@ body {
 }
 
 .lb-content {
+    width: 100vw;
+    height: 100vh;
     display: flex;
-    flex-direction: column;
     align-items: center;
-    max-width: 95vw;
-    max-height: 95vh;
+    justify-content: center;
 }
 
-#lb-img, #lb-video {
-    max-width: 92vw;
-    max-height: 82vh;
+#lb-img {
+    width: 100vw;
+    height: 100vh;
     object-fit: contain;
-    border-radius: 4px;
+}
+
+#lb-video {
+    max-width: 100vw;
+    max-height: 100vh;
+    object-fit: contain;
 }
 
 .lb-close {
     position: fixed;
-    top: 12px;
-    right: 20px;
-    background: none;
+    top: 6px;
+    right: 16px;
+    background: rgba(0, 0, 0, 0.6);
     border: none;
     color: #fff;
-    font-size: 3rem;
+    font-size: 2.5rem;
     cursor: pointer;
-    z-index: 2001;
+    z-index: 2002;
     line-height: 1;
+    padding: 4px 12px;
+    border-radius: 6px;
     opacity: 0.7;
 }
 
@@ -333,20 +333,20 @@ body {
     position: fixed;
     top: 50%;
     transform: translateY(-50%);
-    background: rgba(255, 255, 255, 0.1);
+    background: rgba(0, 0, 0, 0.4);
     border: none;
     color: #fff;
     font-size: 2.333rem;
     cursor: pointer;
     padding: 16px 12px;
-    border-radius: 4px;
+    border-radius: 6px;
     z-index: 2001;
-    opacity: 0.7;
+    opacity: 0.6;
 }
 
 .lb-prev:hover, .lb-next:hover {
     opacity: 1;
-    background: rgba(255, 255, 255, 0.2);
+    background: rgba(0, 0, 0, 0.6);
 }
 
 .lb-prev {
@@ -358,19 +358,52 @@ body {
 }
 
 .lb-exif {
+    position: fixed;
+    top: 10px;
+    left: 0;
+    right: 0;
     display: flex;
     flex-wrap: wrap;
-    gap: 12px;
+    gap: 8px;
     justify-content: center;
-    padding: 10px 0;
+    padding: 0 16px;
     font-size: 1.083rem;
-    color: #999;
+    z-index: 2001;
 }
 
 .lb-exif span {
-    background: rgba(255, 255, 255, 0.08);
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
     padding: 3px 10px;
     border-radius: 4px;
+}
+
+.lb-minimap-wrap {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    width: 180px;
+    height: 140px;
+    border-radius: 8px;
+    overflow: hidden;
+    z-index: 2001;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+    border: 2px solid rgba(255, 255, 255, 0.2);
+}
+
+.lb-minimap {
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+}
+
+@media (max-width: 600px) {
+    .lb-minimap-wrap {
+        width: 120px;
+        height: 100px;
+        bottom: 10px;
+        right: 10px;
+    }
 }
 
 /* Owner badge */
@@ -557,6 +590,59 @@ body {
 
 .folder-nav-link:hover {
     background: var(--color-card-hover);
+}
+
+/* Map overlay */
+.map-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: var(--color-bg);
+    z-index: 2500;
+    flex-direction: column;
+}
+
+.map-close {
+    position: absolute;
+    top: 12px;
+    right: 20px;
+    background: rgba(0, 0, 0, 0.6);
+    border: none;
+    color: #fff;
+    font-size: 2.5rem;
+    cursor: pointer;
+    z-index: 2501;
+    line-height: 1;
+    padding: 4px 12px;
+    border-radius: 6px;
+}
+
+.map-close:hover {
+    background: rgba(0, 0, 0, 0.8);
+}
+
+#map-container {
+    width: 100%;
+    height: 100%;
+}
+
+.map-marker {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    border: 3px solid #fff;
+    background-size: cover;
+    background-position: center;
+    background-color: var(--color-primary);
+    cursor: pointer;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+
+.map-marker:hover {
+    transform: scale(1.2);
+    z-index: 1;
 }
 
 /* Empty state */

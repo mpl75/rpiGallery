@@ -18,6 +18,10 @@ $thumbsUrl      = rtrim($config['thumbnailsUrl'], '/');
 $fullsizeFolder = rtrim($config['fullsizeFolder'], '/');
 $fullsizeUrl    = rtrim($config['fullsizeUrl'], '/');
 
+$mapyApiKey = $config['mapyApiKey'] ?? '';
+$thumbInfo = $config['thumbnailInfo'] ?? ['date' => true, 'camera' => true, 'owner' => false];
+$showOwnerBadge = $config['showOwnerBadge'] ?? true;
+
 $imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
 $videoExts = $config['videoExtensions'] ?? [];
 $allExts = array_merge($imageExts, $videoExts);
@@ -402,6 +406,10 @@ function showLoginForm($error = false) {
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="stylesheet" href="/rpiGallery/gallery.css">
+<?php if ($mapyApiKey): ?>
+    <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.css">
+    <script src="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.js"></script>
+<?php endif; ?>
 </head>
 <body>
 
@@ -419,11 +427,13 @@ function showLoginForm($error = false) {
 <?php endif; ?>
 </nav>
 
-<?php if (!$isSharedAccess): ?>
-<!-- Crawler control -->
 <div id="crawler-bar" class="crawler-bar">
     <div id="crawler-status"></div>
     <div class="crawler-buttons">
+        <?php if ($mapyApiKey): ?>
+            <button onclick="openMap()" class="btn-share" id="btn-map" style="display:none">Mapa</button>
+        <?php endif; ?>
+<?php if (!$isSharedAccess): ?>
         <?php if ($path && $mediaFiles): ?>
             <button onclick="shareFolder()" class="btn-share">Sdílet</button>
         <?php endif; ?>
@@ -431,9 +441,6 @@ function showLoginForm($error = false) {
         <button id="btn-start" onclick="crawlerAction('start')">Aktualizovat galerii</button>
         <button id="btn-stop" onclick="crawlerAction('stop')" style="display:none">Zastavit</button>
         <?php endif; ?>
-    </div>
-</div>
-
 <!-- Share dialog -->
 <div id="share-dialog" class="share-dialog" style="display:none">
     <div class="share-dialog-content">
@@ -451,6 +458,8 @@ function showLoginForm($error = false) {
     </div>
 </div>
 <?php endif; ?>
+    </div>
+</div>
 
 <?php if ($folders): ?>
 <section class="folders">
@@ -496,20 +505,25 @@ function showLoginForm($error = false) {
         $mapped = $entry['mappedName'] ?? $name;
         $thumbUrl = $thumbsUrl . '/' . encodePath($path ? $path . '/' . $mapped : $mapped);
     ?>
-        <div class="image-card" data-lb-index="<?= $lbIndex ?>" data-full="<?= htmlspecialchars($fullUrl) ?>" data-type="<?= $isVideo ? 'video' : 'image' ?>" data-exif="<?= htmlspecialchars(json_encode($exif, JSON_UNESCAPED_UNICODE)) ?>"<?php if ($owner): ?> data-owner="<?= htmlspecialchars($owner['name']) ?>"<?php endif; ?>>
+        <div class="image-card" data-lb-index="<?= $lbIndex ?>" data-full="<?= htmlspecialchars($fullUrl) ?>" data-type="<?= $isVideo ? 'video' : 'image' ?>" data-exif="<?= htmlspecialchars(json_encode($exif, JSON_UNESCAPED_UNICODE)) ?>"<?php if ($owner): ?> data-owner="<?= htmlspecialchars($owner['name']) ?>"<?php endif; ?><?php if (!empty($exif['gps'])): ?> data-gps="<?= $exif['gps']['lat'] ?>,<?= $exif['gps']['lon'] ?>"<?php endif; ?>>
             <div class="thumb-wrap" onclick="openLightbox(<?= $lbIndex ?>)">
                 <img src="<?= htmlspecialchars($thumbUrl) ?>" alt="" loading="lazy">
-                <?php if ($isVideo): ?>
-                    <span class="video-badge">&#9654;</span>
-                <?php endif; ?>
-                <?php if ($owner): ?>
-                    <span class="owner-badge"><?= htmlspecialchars($owner['initials']) ?></span>
-                <?php endif; ?>
             </div>
+            <?php if ($isVideo): ?>
+                <span class="video-badge">&#9654;</span>
+            <?php endif; ?>
+            <?php if ($showOwnerBadge && $owner): ?>
+                <span class="owner-badge"><?= htmlspecialchars($owner['initials']) ?></span>
+            <?php endif; ?>
             <div class="image-info">
-                <span class="image-date"><?= htmlspecialchars(formatDate($dateTaken)) ?></span>
-                <?php if ($camera): ?>
+                <?php if (!empty($thumbInfo['date']) && $dateTaken): ?>
+                    <span class="image-date"><?= htmlspecialchars(formatDate($dateTaken)) ?></span>
+                <?php endif; ?>
+                <?php if (!empty($thumbInfo['camera']) && $camera): ?>
                     <span class="image-camera"><?= htmlspecialchars($camera) ?></span>
+                <?php endif; ?>
+                <?php if (!empty($thumbInfo['owner']) && $owner): ?>
+                    <span class="image-camera"><?= htmlspecialchars($owner['name']) ?></span>
                 <?php endif; ?>
             </div>
         </div>
@@ -536,6 +550,14 @@ function showLoginForm($error = false) {
     <p class="empty">Složka je prázdná.</p>
 <?php endif; ?>
 
+<?php if ($mapyApiKey): ?>
+<!-- Map overlay -->
+<div id="map-overlay" class="map-overlay" style="display:none">
+    <button class="map-close" onclick="closeMap()">&times;</button>
+    <div id="map-container"></div>
+</div>
+<?php endif; ?>
+
 <!-- Lightbox -->
 <div id="lightbox" class="lightbox" onclick="closeLightbox(event)">
     <button class="lb-close" onclick="closeLightbox()">&times;</button>
@@ -547,6 +569,9 @@ function showLoginForm($error = false) {
         <div id="lb-exif" class="lb-exif"></div>
     </div>
 </div>
+<?php if ($mapyApiKey): ?>
+<div id="lb-minimap-wrap" class="lb-minimap-wrap" style="display:none;cursor:pointer" onclick="closeLightbox();openMap()"><div id="lb-minimap" class="lb-minimap"></div></div>
+<?php endif; ?>
 
 <script>
 // Lightbox
@@ -571,6 +596,8 @@ function closeLightbox(e) {
     vid.src = '';
     vid.style.display = 'none';
     document.getElementById('lb-img').style.display = '';
+    const mmWrap = document.getElementById('lb-minimap-wrap');
+    if (mmWrap) mmWrap.style.display = 'none';
 }
 
 const prevFolderUrl = <?= json_encode(!$isSharedAccess && $prevFolder ? $prevFolder['url'] : null) ?>;
@@ -601,6 +628,7 @@ function showImage() {
         img.src = '';
         vid.src = card.dataset.full;
         vid.style.display = '';
+        vid.play().catch(() => {});
     } else {
         vid.pause();
         vid.src = '';
@@ -629,6 +657,9 @@ function showImage() {
     const owner = card.dataset.owner;
     if (owner) h += '<span>' + owner + '</span>';
     el.innerHTML = h;
+
+    // Minimap
+    updateMinimap(card.dataset.gps);
 }
 
 // Keyboard
@@ -725,6 +756,164 @@ function copyShareUrl() {
     input.select();
     navigator.clipboard.writeText(input.value);
 }
+
+<?php if ($mapyApiKey): ?>
+// Minimap in lightbox
+let minimapInstance = null;
+let minimapMarker = null;
+const minimapApiKey = <?= json_encode($mapyApiKey) ?>;
+
+function updateMinimap(gpsStr) {
+    const wrap = document.getElementById('lb-minimap-wrap');
+    if (!wrap) return;
+
+    if (!gpsStr) {
+        wrap.style.display = 'none';
+        return;
+    }
+
+    const [lat, lon] = gpsStr.split(',').map(Number);
+    wrap.style.display = '';
+
+    if (minimapInstance) {
+        minimapInstance.jumpTo({center: [lon, lat], zoom: 13});
+        minimapMarker.setLngLat([lon, lat]);
+        setTimeout(() => minimapInstance.resize(), 50);
+    } else {
+        setTimeout(() => {
+            minimapInstance = new maplibregl.Map({
+                container: 'lb-minimap',
+                style: {
+                    version: 8,
+                    sources: {
+                        'mapy': {
+                            type: 'raster',
+                            url: 'https://api.mapy.cz/v1/maptiles/outdoor/tiles.json?apikey=' + encodeURIComponent(minimapApiKey),
+                            tileSize: 256
+                        }
+                    },
+                    layers: [{id: 'mapy-tiles', type: 'raster', source: 'mapy'}]
+                },
+                center: [lon, lat],
+                zoom: 13,
+                attributionControl: false,
+                interactive: false,
+                transformRequest: (url) => {
+                    if (url.includes('api.mapy.cz')) {
+                        return { url, headers: { 'X-Mapy-Api-Key': minimapApiKey } };
+                    }
+                }
+            });
+            minimapMarker = new maplibregl.Marker({color: '#7eb8da'})
+                .setLngLat([lon, lat])
+                .addTo(minimapInstance);
+        }, 100);
+    }
+}
+
+// Map
+let mapInstance = null;
+
+// Collect GPS points from image cards
+const gpsPoints = [];
+cards.forEach((card, idx) => {
+    if (card.dataset.gps) {
+        const [lat, lon] = card.dataset.gps.split(',').map(Number);
+        gpsPoints.push({lat, lon, idx, thumb: card.querySelector('img')?.src || ''});
+    }
+});
+
+// Show map button only if there are GPS points
+if (gpsPoints.length > 0) {
+    const btnMap = document.getElementById('btn-map');
+    if (btnMap) btnMap.style.display = '';
+}
+
+function openMap() {
+    const overlay = document.getElementById('map-overlay');
+    overlay.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+
+    if (mapInstance) {
+        mapInstance.resize();
+        return;
+    }
+
+    // Calculate bounds
+    let minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
+    gpsPoints.forEach(p => {
+        if (p.lat < minLat) minLat = p.lat;
+        if (p.lat > maxLat) maxLat = p.lat;
+        if (p.lon < minLon) minLon = p.lon;
+        if (p.lon > maxLon) maxLon = p.lon;
+    });
+
+    const centerLat = (minLat + maxLat) / 2;
+    const centerLon = (minLon + maxLon) / 2;
+
+    const apiKey = <?= json_encode($mapyApiKey) ?>;
+
+    mapInstance = new maplibregl.Map({
+        container: 'map-container',
+        style: {
+            version: 8,
+            sources: {
+                'mapy': {
+                    type: 'raster',
+                    url: 'https://api.mapy.cz/v1/maptiles/outdoor/tiles.json?apikey=' + encodeURIComponent(apiKey),
+                    tileSize: 256
+                }
+            },
+            layers: [{
+                id: 'mapy-tiles',
+                type: 'raster',
+                source: 'mapy'
+            }]
+        },
+        center: [centerLon, centerLat],
+        zoom: 12,
+        transformRequest: (url) => {
+            if (url.includes('api.mapy.cz')) {
+                return { url, headers: { 'X-Mapy-Api-Key': apiKey } };
+            }
+        }
+    });
+
+    mapInstance.addControl(new maplibregl.NavigationControl(), 'top-right');
+
+    // Fit bounds if multiple points spread out
+    if (maxLat - minLat > 0.001 || maxLon - minLon > 0.001) {
+        mapInstance.fitBounds([[minLon, minLat], [maxLon, maxLat]], {padding: 60, maxZoom: 16});
+    }
+
+    // Add markers
+    gpsPoints.forEach(p => {
+        const el = document.createElement('div');
+        el.className = 'map-marker';
+        if (p.thumb) {
+            el.style.backgroundImage = 'url(' + p.thumb + ')';
+        }
+        el.addEventListener('click', () => {
+            closeMap();
+            openLightbox(p.idx);
+        });
+        new maplibregl.Marker({element: el})
+            .setLngLat([p.lon, p.lat])
+            .addTo(mapInstance);
+    });
+}
+
+function closeMap() {
+    document.getElementById('map-overlay').style.display = 'none';
+    document.body.style.overflow = '';
+}
+
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && document.getElementById('map-overlay').style.display !== 'none') {
+        closeMap();
+    }
+});
+<?php endif; ?>
 </script>
 
 </body>
