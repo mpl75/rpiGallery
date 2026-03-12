@@ -2,6 +2,12 @@
 set_time_limit(0);
 putenv('LANG=en_US.UTF-8');
 setlocale(LC_ALL, 'en_US.UTF-8');
+
+// Extend session lifetime if "remember me" cookie exists
+if (isset($_COOKIE['remember_me'])) {
+    session_set_cookie_params(365 * 86400);
+    ini_set('session.gc_maxlifetime', 365 * 86400);
+}
 session_start();
 
 $config = json_decode(file_get_contents(__DIR__ . '/config.json'), true);
@@ -13,7 +19,7 @@ $fullsizeFolder = rtrim($config['fullsizeFolder'], '/');
 $fullsizeUrl    = rtrim($config['fullsizeUrl'], '/');
 
 $imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
-$videoExts = [];
+$videoExts = $config['videoExtensions'] ?? [];
 $allExts = array_merge($imageExts, $videoExts);
 
 // --- Shares ---
@@ -59,6 +65,7 @@ if (isset($_GET['action']) && !empty($_SESSION['authenticated'])) {
 
     switch ($_GET['action']) {
         case 'crawler-start':
+            if (empty($_SESSION['admin'])) { echo json_encode(['ok' => false]); exit; }
             $pidFile = __DIR__ . '/crawler.pid';
             if (file_exists($pidFile)) {
                 $oldPid = (int)file_get_contents($pidFile);
@@ -75,6 +82,7 @@ if (isset($_GET['action']) && !empty($_SESSION['authenticated'])) {
             exit;
 
         case 'crawler-stop':
+            if (empty($_SESSION['admin'])) { echo json_encode(['ok' => false]); exit; }
             file_put_contents(__DIR__ . '/crawler.stop', '1');
             echo json_encode(['ok' => true]);
             exit;
@@ -117,6 +125,7 @@ if (isset($_GET['action']) && !empty($_SESSION['authenticated'])) {
 // --- Authentication ---
 if (isset($_GET['logout'])) {
     session_destroy();
+    setcookie('remember_me', '', time() - 3600, '/', '', true, true);
     header('Location: /gallery');
     exit;
 }
@@ -131,6 +140,14 @@ if (isset($_POST['login_user'], $_POST['login_pass'])) {
     }
     if ($authenticated) {
         $_SESSION['authenticated'] = true;
+        $_SESSION['admin'] = !empty($u['admin']);
+        if (!empty($_POST['remember'])) {
+            setcookie('remember_me', '1', time() + 365 * 86400, '/', '', true, true);
+            session_set_cookie_params(365 * 86400);
+            ini_set('session.gc_maxlifetime', 365 * 86400);
+            // Regenerate session with new lifetime
+            session_regenerate_id(true);
+        }
         header('Location: ' . $_SERVER['REQUEST_URI']);
         exit;
     } else {
@@ -165,9 +182,41 @@ $fullPath = $rootGallery . ($path ? '/' . $path : '');
 $baseUrl = '/gallery';
 $shareBaseUrl = $isSharedAccess ? '/gallery/s/' . $shareHash : null;
 
-// If path points to a file, serve the fullsize preview
+// If path points to a file, serve the fullsize preview or video
 if (is_file($fullPath)) {
     $ext = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION));
+
+    // Serve video original directly
+    if (in_array($ext, $videoExts)) {
+        $mimeTypes = ['mp4' => 'video/mp4', 'webm' => 'video/webm', 'mov' => 'video/quicktime'];
+        $mime = $mimeTypes[$ext] ?? 'application/octet-stream';
+        $size = filesize($fullPath);
+
+        // Support range requests for video seeking
+        if (isset($_SERVER['HTTP_RANGE'])) {
+            preg_match('/bytes=(\d+)-(\d*)/', $_SERVER['HTTP_RANGE'], $matches);
+            $start = (int)$matches[1];
+            $end = $matches[2] !== '' ? (int)$matches[2] : $size - 1;
+            $length = $end - $start + 1;
+            header('HTTP/1.1 206 Partial Content');
+            header("Content-Range: bytes $start-$end/$size");
+            header("Content-Length: $length");
+            header("Content-Type: $mime");
+            header('Accept-Ranges: bytes');
+            $fh = fopen($fullPath, 'rb');
+            fseek($fh, $start);
+            echo fread($fh, $length);
+            fclose($fh);
+        } else {
+            header("Content-Type: $mime");
+            header("Content-Length: $size");
+            header('Accept-Ranges: bytes');
+            header('Cache-Control: public, max-age=86400');
+            readfile($fullPath);
+        }
+        exit;
+    }
+
     if (!in_array($ext, $imageExts)) {
         http_response_code(403);
         exit;
@@ -179,11 +228,11 @@ if (is_file($fullPath)) {
 
     $djPath = $thumbsFolder . ($dir ? '/' . $dir : '') . '/data.json';
     $djData = file_exists($djPath) ? (json_decode(file_get_contents($djPath), true) ?: []) : [];
+    unset($djData['_version']);
     $mappedName = $djData[$fileName]['mappedName'] ?? $fileName;
 
     $previewFile = $previewDir . '/' . $mappedName;
     if (!file_exists($previewFile)) {
-        // Fullsize not yet generated, serve original
         header('Content-Type: image/' . ($ext === 'jpg' ? 'jpeg' : $ext));
         header('Content-Length: ' . filesize($fullPath));
         readfile($fullPath);
@@ -230,6 +279,7 @@ $dataFile = $thumbPath . '/data.json';
 $data = [];
 if (file_exists($dataFile)) {
     $data = json_decode(file_get_contents($dataFile), true) ?: [];
+    unset($data['_version']);
 }
 
 // Sort by date taken
@@ -329,6 +379,7 @@ function showLoginForm($error = false) {
         <?php endif; ?>
         <input type="text" name="login_user" placeholder="E-mail" autocomplete="username" required>
         <input type="password" name="login_pass" placeholder="Heslo" autocomplete="current-password" required>
+        <label class="remember-label"><input type="checkbox" name="remember" value="1" checked> Pamatuj si mě</label>
         <button type="submit">Přihlásit</button>
     </form>
 </div>
@@ -376,8 +427,10 @@ function showLoginForm($error = false) {
         <?php if ($path && $mediaFiles): ?>
             <button onclick="shareFolder()" class="btn-share">Sdílet</button>
         <?php endif; ?>
+        <?php if (!empty($_SESSION['admin'])): ?>
         <button id="btn-start" onclick="crawlerAction('start')">Aktualizovat galerii</button>
         <button id="btn-stop" onclick="crawlerAction('stop')" style="display:none">Zastavit</button>
+        <?php endif; ?>
     </div>
 </div>
 
@@ -438,13 +491,17 @@ function showLoginForm($error = false) {
         $dateTaken = $entry['dateTaken'] ?? '';
         $camera = $exif['Camera'] ?? '';
         $owner = $entry['owner'] ?? null;
+        $isVideo = ($entry['type'] ?? 'image') === 'video';
         $fullUrl = ($shareBaseUrl ?? $baseUrl) . '/' . encodePath($isSharedAccess ? $name : ($path ? $path . '/' . $name : $name));
         $mapped = $entry['mappedName'] ?? $name;
         $thumbUrl = $thumbsUrl . '/' . encodePath($path ? $path . '/' . $mapped : $mapped);
     ?>
-        <div class="image-card" data-lb-index="<?= $lbIndex ?>" data-full="<?= htmlspecialchars($fullUrl) ?>" data-exif="<?= htmlspecialchars(json_encode($exif, JSON_UNESCAPED_UNICODE)) ?>"<?php if ($owner): ?> data-owner="<?= htmlspecialchars($owner['name']) ?>"<?php endif; ?>>
+        <div class="image-card" data-lb-index="<?= $lbIndex ?>" data-full="<?= htmlspecialchars($fullUrl) ?>" data-type="<?= $isVideo ? 'video' : 'image' ?>" data-exif="<?= htmlspecialchars(json_encode($exif, JSON_UNESCAPED_UNICODE)) ?>"<?php if ($owner): ?> data-owner="<?= htmlspecialchars($owner['name']) ?>"<?php endif; ?>>
             <div class="thumb-wrap" onclick="openLightbox(<?= $lbIndex ?>)">
                 <img src="<?= htmlspecialchars($thumbUrl) ?>" alt="" loading="lazy">
+                <?php if ($isVideo): ?>
+                    <span class="video-badge">&#9654;</span>
+                <?php endif; ?>
                 <?php if ($owner): ?>
                     <span class="owner-badge"><?= htmlspecialchars($owner['initials']) ?></span>
                 <?php endif; ?>
@@ -486,6 +543,7 @@ function showLoginForm($error = false) {
     <button class="lb-next" onclick="navigateLightbox(event, 1)">&#10095;</button>
     <div class="lb-content" onclick="event.stopPropagation()">
         <img id="lb-img" src="" alt="">
+        <video id="lb-video" controls style="display:none"></video>
         <div id="lb-exif" class="lb-exif"></div>
     </div>
 </div>
@@ -508,6 +566,11 @@ function closeLightbox(e) {
     document.getElementById('lightbox').classList.remove('active');
     document.body.style.overflow = '';
     document.getElementById('lb-img').src = '';
+    const vid = document.getElementById('lb-video');
+    vid.pause();
+    vid.src = '';
+    vid.style.display = 'none';
+    document.getElementById('lb-img').style.display = '';
 }
 
 const prevFolderUrl = <?= json_encode(!$isSharedAccess && $prevFolder ? $prevFolder['url'] : null) ?>;
@@ -529,7 +592,22 @@ function navigateLightbox(e, dir) {
 
 function showImage() {
     const card = cards[currentIdx];
-    document.getElementById('lb-img').src = card.dataset.full;
+    const img = document.getElementById('lb-img');
+    const vid = document.getElementById('lb-video');
+    const isVideo = card.dataset.type === 'video';
+
+    if (isVideo) {
+        img.style.display = 'none';
+        img.src = '';
+        vid.src = card.dataset.full;
+        vid.style.display = '';
+    } else {
+        vid.pause();
+        vid.src = '';
+        vid.style.display = 'none';
+        img.src = card.dataset.full;
+        img.style.display = '';
+    }
 
     const exif = JSON.parse(card.dataset.exif);
     const el = document.getElementById('lb-exif');

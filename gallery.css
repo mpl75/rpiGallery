@@ -79,6 +79,15 @@ body {
     cursor: pointer;
 }
 
+.remember-label {
+    font-size: 1rem;
+    color: var(--color-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
 .login-form button:hover {
     background: var(--color-primary-hover);
 }
@@ -299,6 +308,7 @@ body {
     max-width: 92vw;
     max-height: 82vh;
     object-fit: contain;
+    border-radius: 4px;
 }
 
 .lb-close {
