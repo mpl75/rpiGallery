@@ -256,6 +256,7 @@ if (!is_dir($fullPath)) {
 }
 
 $thumbPath = $thumbsFolder . ($path ? '/' . $path : '');
+$continuousView = isset($_GET['view']) && $_GET['view'] === 'continuous';
 
 // Scan directory
 $folders = [];
@@ -293,6 +294,70 @@ usort($mediaFiles, function ($a, $b) use ($data) {
     return strcmp($dateA, $dateB);
 });
 
+// Continuous view: recursively load all nested albums
+$continuousAlbums = [];
+if ($continuousView && $folders && !$mediaFiles) {
+    function scanAlbums($srcDir, $relPath, &$results, $thumbsFolder, $allExts) {
+        $entries = @scandir($srcDir);
+        if (!$entries) return;
+
+        $subDirs = [];
+        $mediaFiles = [];
+        foreach ($entries as $e) {
+            if ($e[0] === '.') continue;
+            if (is_dir($srcDir . '/' . $e)) {
+                $subDirs[] = $e;
+            } else {
+                $ext = strtolower(pathinfo($e, PATHINFO_EXTENSION));
+                if (in_array($ext, $allExts)) {
+                    $mediaFiles[] = $e;
+                }
+            }
+        }
+
+        if ($mediaFiles) {
+            // This is a leaf album - load its data and add
+            $thumbPath = $thumbsFolder . '/' . $relPath;
+            $dataFile = $thumbPath . '/data.json';
+            $data = [];
+            if (file_exists($dataFile)) {
+                $data = json_decode(file_get_contents($dataFile), true) ?: [];
+                unset($data['_version']);
+            }
+
+            usort($mediaFiles, function ($a, $b) use ($data) {
+                $dateA = $data[$a]['dateTaken'] ?? '9999';
+                $dateB = $data[$b]['dateTaken'] ?? '9999';
+                return strcmp($dateA, $dateB);
+            });
+
+            $results[] = [
+                'name' => basename($relPath),
+                'relPath' => $relPath,
+                'media' => $mediaFiles,
+                'data' => $data,
+            ];
+        }
+
+        if ($subDirs) {
+            sort($subDirs, SORT_LOCALE_STRING);
+            foreach ($subDirs as $sub) {
+                scanAlbums($srcDir . '/' . $sub, $relPath . '/' . $sub, $results, $thumbsFolder, $allExts);
+            }
+        }
+    }
+
+    foreach ($folders as $folder) {
+        scanAlbums(
+            $fullPath . '/' . $folder,
+            ($path ? $path . '/' : '') . $folder,
+            $continuousAlbums,
+            $thumbsFolder,
+            $allExts
+        );
+    }
+}
+
 // Build breadcrumb
 $breadcrumbs = [];
 $breadcrumbs[] = ['name' => 'Galerie', 'url' => $baseUrl];
@@ -326,18 +391,19 @@ if ($path) {
         sort($siblings, SORT_LOCALE_STRING);
         $idx = array_search($currentName, $siblings);
         if ($idx !== false) {
+            $viewSuffix = $continuousView ? '?view=continuous' : '';
             if ($idx > 0) {
                 $prevName = $siblings[$idx - 1];
                 $prevFolder = [
                     'name' => $prevName,
-                    'url' => $baseUrl . '/' . encodePath($parentPath ? $parentPath . '/' . $prevName : $prevName),
+                    'url' => $baseUrl . '/' . encodePath($parentPath ? $parentPath . '/' . $prevName : $prevName) . $viewSuffix,
                 ];
             }
             if ($idx < count($siblings) - 1) {
                 $nextName = $siblings[$idx + 1];
                 $nextFolder = [
                     'name' => $nextName,
-                    'url' => $baseUrl . '/' . encodePath($parentPath ? $parentPath . '/' . $nextName : $nextName),
+                    'url' => $baseUrl . '/' . encodePath($parentPath ? $parentPath . '/' . $nextName : $nextName) . $viewSuffix,
                 ];
             }
         }
@@ -423,13 +489,25 @@ function showLoginForm($error = false) {
         <?php endif; ?>
     <?php endforeach; ?>
 <?php if (!$isSharedAccess): ?>
-    <a href="?logout" class="logout-link">Odhlásit</a>
+    <span class="nav-right">
+        <span id="crawler-status" class="crawler-status-inline"></span>
+        <?php if (!empty($_SESSION['admin'])): ?>
+        <button id="btn-start" onclick="crawlerAction('start')" class="nav-link-btn">Aktualizovat</button>
+        <button id="btn-stop" onclick="crawlerAction('stop')" class="nav-link-btn nav-link-btn-stop" style="display:none">Zastavit</button>
+        <?php endif; ?>
+        <a href="?logout" class="logout-link">Odhlásit</a>
+    </span>
 <?php endif; ?>
 </nav>
 
-<div id="crawler-bar" class="crawler-bar">
-    <div id="crawler-status"></div>
-    <div class="crawler-buttons">
+<div class="toolbar">
+    <?php if ($folders && !$mediaFiles): ?>
+    <div class="view-toggle">
+        <a href="<?= htmlspecialchars($baseUrl . '/' . encodePath($path)) ?>" class="view-toggle-option<?= !$continuousView ? ' active' : '' ?>">Složky</a>
+        <a href="<?= htmlspecialchars($baseUrl . '/' . encodePath($path)) ?>?view=continuous" class="view-toggle-option<?= $continuousView ? ' active' : '' ?>">Přehled</a>
+    </div>
+    <?php endif; ?>
+    <span class="toolbar-right">
         <?php if ($mapyApiKey): ?>
             <button onclick="openMap()" class="btn-share" id="btn-map" style="display:none">Mapa</button>
         <?php endif; ?>
@@ -437,10 +515,9 @@ function showLoginForm($error = false) {
         <?php if ($path && $mediaFiles): ?>
             <button onclick="shareFolder()" class="btn-share">Sdílet</button>
         <?php endif; ?>
-        <?php if (!empty($_SESSION['admin'])): ?>
-        <button id="btn-start" onclick="crawlerAction('start')">Aktualizovat galerii</button>
-        <button id="btn-stop" onclick="crawlerAction('stop')" style="display:none">Zastavit</button>
-        <?php endif; ?>
+<?php endif; ?>
+    </span>
+<?php if (!$isSharedAccess): ?>
 <!-- Share dialog -->
 <div id="share-dialog" class="share-dialog" style="display:none">
     <div class="share-dialog-content">
@@ -458,10 +535,60 @@ function showLoginForm($error = false) {
     </div>
 </div>
 <?php endif; ?>
-    </div>
 </div>
 
-<?php if ($folders): ?>
+<?php if ($continuousView && $continuousAlbums): ?>
+<?php
+    $lbIndex = 0;
+    foreach ($continuousAlbums as $album):
+        $albumUrl = $baseUrl . '/' . encodePath($album['relPath']);
+?>
+<section class="continuous-album">
+<?php
+        $albumDisplayName = (($pos = strpos($album['name'], ' ')) !== false) ? substr($album['name'], $pos + 1) : $album['name'];
+        $albumDate = substr($album['name'], 0, 10);
+?>
+    <a href="<?= htmlspecialchars($albumUrl) ?>" class="album-header"><?= htmlspecialchars($albumDisplayName) ?><span class="album-date"><?= htmlspecialchars($albumDate) ?></span></a>
+    <div class="images">
+    <?php foreach ($album['media'] as $name):
+        $entry = $album['data'][$name] ?? null;
+        if (!$entry) continue;
+        $exif = $entry['exif'] ?? [];
+        $dateTaken = $entry['dateTaken'] ?? '';
+        $camera = $exif['Camera'] ?? '';
+        $owner = $entry['owner'] ?? null;
+        $isVideo = ($entry['type'] ?? 'image') === 'video';
+        $fullUrl = $baseUrl . '/' . encodePath($album['relPath'] . '/' . $name);
+        $mapped = $entry['mappedName'] ?? $name;
+        $thumbUrl = $thumbsUrl . '/' . encodePath($album['relPath'] . '/' . $mapped);
+    ?>
+        <div class="image-card" data-lb-index="<?= $lbIndex ?>" data-full="<?= htmlspecialchars($fullUrl) ?>" data-type="<?= $isVideo ? 'video' : 'image' ?>" data-exif="<?= htmlspecialchars(json_encode($exif, JSON_UNESCAPED_UNICODE)) ?>"<?php if ($owner): ?> data-owner="<?= htmlspecialchars($owner['name']) ?>"<?php endif; ?><?php if (!empty($exif['gps'])): ?> data-gps="<?= $exif['gps']['lat'] ?>,<?= $exif['gps']['lon'] ?>"<?php endif; ?>>
+            <div class="thumb-wrap" onclick="openLightbox(<?= $lbIndex ?>)">
+                <img src="<?= htmlspecialchars($thumbUrl) ?>" alt="" loading="lazy">
+            </div>
+            <?php if ($isVideo): ?>
+                <span class="video-badge">&#9654;</span>
+            <?php endif; ?>
+            <?php if ($showOwnerBadge && $owner): ?>
+                <span class="owner-badge"><?= htmlspecialchars($owner['initials']) ?></span>
+            <?php endif; ?>
+            <div class="image-info">
+                <?php if (!empty($thumbInfo['date']) && $dateTaken): ?>
+                    <span class="image-date"><?= htmlspecialchars(formatDate($dateTaken)) ?></span>
+                <?php endif; ?>
+                <?php if (!empty($thumbInfo['camera']) && $camera): ?>
+                    <span class="image-camera"><?= htmlspecialchars($camera) ?></span>
+                <?php endif; ?>
+            </div>
+        </div>
+    <?php
+        $lbIndex++;
+    endforeach; ?>
+    </div>
+</section>
+<?php endforeach; ?>
+
+<?php elseif ($folders && !$continuousView): ?>
 <section class="folders">
     <?php foreach ($folders as $folder): ?>
         <a class="folder" href="<?= $baseUrl . '/' . encodePath($path ? $path . '/' . $folder : $folder) ?>">
@@ -483,7 +610,6 @@ function showLoginForm($error = false) {
     foreach ($mediaFiles as $name):
         $entry = $data[$name] ?? null;
         if (!$entry) {
-            // Not yet processed by crawler - show placeholder
     ?>
         <div class="image-card image-card-pending">
             <div class="thumb-wrap">
@@ -699,13 +825,14 @@ function updateCrawlerStatus() {
             const statusEl = document.getElementById('crawler-status');
             const btnStart = document.getElementById('btn-start');
             const btnStop = document.getElementById('btn-stop');
+            if (!btnStart) return;
 
             if (s.running) {
-                let text = 'Crawler běží';
-                if (s.currentFolder) text += ': ' + s.currentFolder;
-                if (s.currentFile) text += ' (' + s.currentFile + ')';
+                let text = 'Crawler: ';
                 if (s.processedFolders && s.totalFolders) {
-                    text += ' — ' + s.processedFolders + '/' + s.totalFolders + ' složek';
+                    text += s.processedFolders + '/' + s.totalFolders;
+                } else {
+                    text += 'běží';
                 }
                 statusEl.textContent = text;
                 btnStart.style.display = 'none';
@@ -714,13 +841,7 @@ function updateCrawlerStatus() {
                     crawlerPolling = setInterval(updateCrawlerStatus, 3000);
                 }
             } else {
-                if (s.state === 'done') {
-                    statusEl.textContent = 'Hotovo — ' + (s.totalNewFiles || 0) + ' nových souborů v ' + (s.foldersWithNewFiles || 0) + ' složkách';
-                } else if (s.state === 'stopped') {
-                    statusEl.textContent = 'Zastaveno — ' + (s.processedFolders || 0) + '/' + (s.totalFolders || 0) + ' složek';
-                } else {
-                    statusEl.textContent = '';
-                }
+                statusEl.textContent = '';
                 btnStart.style.display = '';
                 btnStop.style.display = 'none';
                 if (crawlerPolling) {
