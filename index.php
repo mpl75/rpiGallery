@@ -3,11 +3,6 @@ set_time_limit(0);
 putenv('LANG=en_US.UTF-8');
 setlocale(LC_ALL, 'en_US.UTF-8');
 
-// Extend session lifetime if "remember me" cookie exists
-if (isset($_COOKIE['remember_me'])) {
-    session_set_cookie_params(365 * 86400);
-    ini_set('session.gc_maxlifetime', 365 * 86400);
-}
 session_start();
 
 $config = json_decode(file_get_contents(__DIR__ . '/config.json'), true);
@@ -127,9 +122,29 @@ if (isset($_GET['action']) && !empty($_SESSION['authenticated'])) {
 }
 
 // --- Authentication ---
+// Auth token: HMAC-signed cookie, independent of PHP sessions
+function makeAuthToken($user, $admin, $config) {
+    $secret = $config['users'][0]['password']; // use first bcrypt hash as HMAC key
+    $payload = $user . '|' . ($admin ? '1' : '0');
+    $sig = hash_hmac('sha256', $payload, $secret);
+    return base64_encode($payload . '|' . $sig);
+}
+
+function verifyAuthToken($token, $config) {
+    $decoded = base64_decode($token, true);
+    if (!$decoded) return null;
+    $parts = explode('|', $decoded);
+    if (count($parts) !== 3) return null;
+    [$user, $admin, $sig] = $parts;
+    $secret = $config['users'][0]['password'];
+    $expected = hash_hmac('sha256', $user . '|' . $admin, $secret);
+    if (!hash_equals($expected, $sig)) return null;
+    return ['user' => $user, 'admin' => $admin === '1'];
+}
+
 if (isset($_GET['logout'])) {
     session_destroy();
-    setcookie('remember_me', '', time() - 3600, '/', '', true, true);
+    setcookie('auth', '', time() - 3600, '/', '', true, true);
     header('Location: /gallery');
     exit;
 }
@@ -145,17 +160,21 @@ if (isset($_POST['login_user'], $_POST['login_pass'])) {
     if ($authenticated) {
         $_SESSION['authenticated'] = true;
         $_SESSION['admin'] = !empty($u['admin']);
-        if (!empty($_POST['remember'])) {
-            setcookie('remember_me', '1', time() + 365 * 86400, '/', '', true, true);
-            session_set_cookie_params(365 * 86400);
-            ini_set('session.gc_maxlifetime', 365 * 86400);
-            // Regenerate session with new lifetime
-            session_regenerate_id(true);
-        }
+        $token = makeAuthToken($u['user'], !empty($u['admin']), $config);
+        setcookie('auth', $token, time() + 365 * 86400, '/', '', true, true);
         header('Location: ' . $_SERVER['REQUEST_URI']);
         exit;
     } else {
         $loginError = true;
+    }
+}
+
+// Restore auth from cookie if session expired
+if (empty($_SESSION['authenticated']) && isset($_COOKIE['auth'])) {
+    $authData = verifyAuthToken($_COOKIE['auth'], $config);
+    if ($authData) {
+        $_SESSION['authenticated'] = true;
+        $_SESSION['admin'] = $authData['admin'];
     }
 }
 
@@ -192,6 +211,7 @@ if (is_file($fullPath)) {
 
     // Serve video original directly
     if (in_array($ext, $videoExts)) {
+        session_write_close(); // Release session lock for concurrent range requests
         $mimeTypes = ['mp4' => 'video/mp4', 'webm' => 'video/webm', 'mov' => 'video/quicktime'];
         $mime = $mimeTypes[$ext] ?? 'application/octet-stream';
         $size = filesize($fullPath);
@@ -209,7 +229,13 @@ if (is_file($fullPath)) {
             header('Accept-Ranges: bytes');
             $fh = fopen($fullPath, 'rb');
             fseek($fh, $start);
-            echo fread($fh, $length);
+            $remaining = $length;
+            while ($remaining > 0 && !feof($fh)) {
+                $chunk = min($remaining, 65536);
+                echo fread($fh, $chunk);
+                $remaining -= $chunk;
+                flush();
+            }
             fclose($fh);
         } else {
             header("Content-Type: $mime");
@@ -562,7 +588,7 @@ function showLoginForm($error = false) {
         $mapped = $entry['mappedName'] ?? $name;
         $thumbUrl = $thumbsUrl . '/' . encodePath($album['relPath'] . '/' . $mapped);
     ?>
-        <div class="image-card" data-lb-index="<?= $lbIndex ?>" data-full="<?= htmlspecialchars($fullUrl) ?>" data-type="<?= $isVideo ? 'video' : 'image' ?>" data-exif="<?= htmlspecialchars(json_encode($exif, JSON_UNESCAPED_UNICODE)) ?>"<?php if ($owner): ?> data-owner="<?= htmlspecialchars($owner['name']) ?>"<?php endif; ?><?php if (!empty($exif['gps'])): ?> data-gps="<?= $exif['gps']['lat'] ?>,<?= $exif['gps']['lon'] ?>"<?php endif; ?>>
+        <div class="image-card" data-lb-index="<?= $lbIndex ?>" data-full="<?= htmlspecialchars($fullUrl) ?>" data-type="<?= $isVideo ? 'video' : 'image' ?>" data-exif="<?= htmlspecialchars(json_encode($exif, JSON_UNESCAPED_UNICODE)) ?>"<?php if ($owner): ?> data-owner="<?= htmlspecialchars($owner['name']) ?>"<?php endif; ?><?php if (!empty($exif['gps'])): ?> data-gps="<?= $exif['gps']['lat'] ?>,<?= $exif['gps']['lon'] ?>"<?php endif; ?><?php if (!empty($entry['filesize'])): ?> data-filesize="<?= $entry['filesize'] ?>"<?php endif; ?>>
             <div class="thumb-wrap" onclick="openLightbox(<?= $lbIndex ?>)">
                 <img src="<?= htmlspecialchars($thumbUrl) ?>" alt="" loading="lazy">
             </div>
@@ -631,7 +657,7 @@ function showLoginForm($error = false) {
         $mapped = $entry['mappedName'] ?? $name;
         $thumbUrl = $thumbsUrl . '/' . encodePath($path ? $path . '/' . $mapped : $mapped);
     ?>
-        <div class="image-card" data-lb-index="<?= $lbIndex ?>" data-full="<?= htmlspecialchars($fullUrl) ?>" data-type="<?= $isVideo ? 'video' : 'image' ?>" data-exif="<?= htmlspecialchars(json_encode($exif, JSON_UNESCAPED_UNICODE)) ?>"<?php if ($owner): ?> data-owner="<?= htmlspecialchars($owner['name']) ?>"<?php endif; ?><?php if (!empty($exif['gps'])): ?> data-gps="<?= $exif['gps']['lat'] ?>,<?= $exif['gps']['lon'] ?>"<?php endif; ?>>
+        <div class="image-card" data-lb-index="<?= $lbIndex ?>" data-full="<?= htmlspecialchars($fullUrl) ?>" data-type="<?= $isVideo ? 'video' : 'image' ?>" data-exif="<?= htmlspecialchars(json_encode($exif, JSON_UNESCAPED_UNICODE)) ?>"<?php if ($owner): ?> data-owner="<?= htmlspecialchars($owner['name']) ?>"<?php endif; ?><?php if (!empty($exif['gps'])): ?> data-gps="<?= $exif['gps']['lat'] ?>,<?= $exif['gps']['lon'] ?>"<?php endif; ?><?php if (!empty($entry['filesize'])): ?> data-filesize="<?= $entry['filesize'] ?>"<?php endif; ?>>
             <div class="thumb-wrap" onclick="openLightbox(<?= $lbIndex ?>)">
                 <img src="<?= htmlspecialchars($thumbUrl) ?>" alt="" loading="lazy">
             </div>
@@ -691,7 +717,8 @@ function showLoginForm($error = false) {
     <button class="lb-next" onclick="navigateLightbox(event, 1)">&#10095;</button>
     <div class="lb-content" onclick="event.stopPropagation()">
         <img id="lb-img" src="" alt="">
-        <video id="lb-video" controls style="display:none"></video>
+        <video id="lb-video" controls preload="metadata" style="display:none"></video>
+        <div id="lb-video-loading" class="lb-video-loading" style="display:none"></div>
         <div id="lb-exif" class="lb-exif"></div>
     </div>
 </div>
@@ -719,9 +746,11 @@ function closeLightbox(e) {
     document.getElementById('lb-img').src = '';
     const vid = document.getElementById('lb-video');
     vid.pause();
-    vid.src = '';
+    vid.removeAttribute('src');
+    vid.load();
     vid.style.display = 'none';
     document.getElementById('lb-img').style.display = '';
+    document.getElementById('lb-video-loading').style.display = 'none';
     const mmWrap = document.getElementById('lb-minimap-wrap');
     if (mmWrap) mmWrap.style.display = 'none';
 }
@@ -747,18 +776,50 @@ function showImage() {
     const card = cards[currentIdx];
     const img = document.getElementById('lb-img');
     const vid = document.getElementById('lb-video');
+    const loading = document.getElementById('lb-video-loading');
     const isVideo = card.dataset.type === 'video';
 
+    // Release previous video connection
+    vid.pause();
+    vid.removeAttribute('src');
+    vid.load();
+
     if (isVideo) {
-        img.style.display = 'none';
-        img.src = '';
-        vid.src = card.dataset.full;
-        vid.style.display = '';
-        vid.play().catch(() => {});
-    } else {
-        vid.pause();
-        vid.src = '';
+        const thumbSrc = card.querySelector('img')?.src || '';
+        const filesize = parseInt(card.dataset.filesize || '0');
+        // Show thumbnail as poster while video loads
+        img.src = thumbSrc;
+        img.style.display = '';
+        loading.style.display = '';
+        loading.textContent = '';
         vid.style.display = 'none';
+        vid.poster = thumbSrc;
+        vid.preload = 'auto';
+        vid.src = card.dataset.full;
+
+        function onProgress() {
+            if (vid.buffered.length > 0 && vid.duration) {
+                const pct = Math.round((vid.buffered.end(0) / vid.duration) * 100);
+                loading.textContent = pct + '%';
+            } else if (filesize) {
+                loading.textContent = Math.round(filesize / 1048576) + ' MB';
+            }
+        }
+        vid.addEventListener('progress', onProgress);
+
+        function onCanPlay() {
+            vid.removeEventListener('canplay', onCanPlay);
+            vid.removeEventListener('progress', onProgress);
+            img.style.display = 'none';
+            img.src = '';
+            loading.style.display = 'none';
+            vid.style.display = '';
+            vid.play().catch(() => {});
+        }
+        vid.addEventListener('canplay', onCanPlay);
+    } else {
+        vid.style.display = 'none';
+        loading.style.display = 'none';
         img.src = card.dataset.full;
         img.style.display = '';
     }
@@ -782,6 +843,11 @@ function showImage() {
     if (exif.Camera) h += '<span>' + exif.Camera + '</span>';
     const owner = card.dataset.owner;
     if (owner) h += '<span>' + owner + '</span>';
+    const fs = card.dataset.filesize;
+    if (fs && card.dataset.type === 'video') {
+        const mb = (parseInt(fs) / 1048576).toFixed(0);
+        h += '<span>' + mb + ' MB</span>';
+    }
     el.innerHTML = h;
 
     // Minimap

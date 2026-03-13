@@ -217,6 +217,28 @@ foreach ($allFolders as $relPath) {
 
             if ($isVideo) {
                 $exif['type'] = 'video';
+                // Re-extract video date: filename > Apple tag > creation_time
+                $ts = videoDateFromFilename($name);
+                if (!$ts) {
+                    $probe = shell_exec('ffprobe -v quiet -print_format json -show_format ' . escapeshellarg($srcFile) . ' 2>/dev/null');
+                    if ($probe) {
+                        $meta = json_decode($probe, true);
+                        $tags = $meta['format']['tags'] ?? [];
+                        $appleDate = $tags['com.apple.quicktime.creationdate'] ?? null;
+                        $creationTime = $tags['creation_time'] ?? null;
+                        if ($appleDate) {
+                            $ts = strtotime($appleDate);
+                        } else if ($creationTime) {
+                            $utc = new DateTime($creationTime, new DateTimeZone('UTC'));
+                            $utc->setTimezone(new DateTimeZone('Europe/Prague'));
+                            $ts = $utc->getTimestamp();
+                        }
+                    }
+                }
+                if ($ts) {
+                    $exif['DateTimeOriginal'] = date('Y:m:d H:i:s', $ts);
+                    $data[$name]['dateTaken'] = $exif['DateTimeOriginal'];
+                }
             } else if (in_array($ext, ['jpg', 'jpeg']) && function_exists('exif_read_data')) {
                 $rawExif = @exif_read_data($srcFile, 'ANY_TAG', false);
                 if ($rawExif) {
@@ -237,6 +259,7 @@ foreach ($allFolders as $relPath) {
             $data[$name]['exif'] = $exif;
             $data[$name]['owner'] = $owner;
             $data[$name]['type'] = $isVideo ? 'video' : 'image';
+            $data[$name]['filesize'] = filesize($srcFile);
             $dataChanged = true;
         }
     }
@@ -282,20 +305,27 @@ foreach ($allFolders as $relPath) {
             $dateTaken = null;
 
             if ($isVideo) {
-                // Extract video metadata via ffprobe
-                $probe = shell_exec('ffprobe -v quiet -print_format json -show_format ' . escapeshellarg($srcFile) . ' 2>/dev/null');
-                if ($probe) {
-                    $meta = json_decode($probe, true);
-                    $tags = $meta['format']['tags'] ?? [];
-                    // Try common date tags
-                    $dateStr = $tags['creation_time'] ?? $tags['com.apple.quicktime.creationdate'] ?? null;
-                    if ($dateStr) {
-                        $ts = strtotime($dateStr);
-                        if ($ts) {
-                            $exif['DateTimeOriginal'] = date('Y:m:d H:i:s', $ts);
-                            $dateTaken = $exif['DateTimeOriginal'];
+                // Extract video date: filename (local time) > Apple tag > creation_time (UTC)
+                $ts = videoDateFromFilename($name);
+                if (!$ts) {
+                    $probe = shell_exec('ffprobe -v quiet -print_format json -show_format ' . escapeshellarg($srcFile) . ' 2>/dev/null');
+                    if ($probe) {
+                        $meta = json_decode($probe, true);
+                        $tags = $meta['format']['tags'] ?? [];
+                        $appleDate = $tags['com.apple.quicktime.creationdate'] ?? null;
+                        $creationTime = $tags['creation_time'] ?? null;
+                        if ($appleDate) {
+                            $ts = strtotime($appleDate);
+                        } else if ($creationTime) {
+                            $utc = new DateTime($creationTime, new DateTimeZone('UTC'));
+                            $utc->setTimezone(new DateTimeZone('Europe/Prague'));
+                            $ts = $utc->getTimestamp();
                         }
                     }
+                }
+                if ($ts) {
+                    $exif['DateTimeOriginal'] = date('Y:m:d H:i:s', $ts);
+                    $dateTaken = $exif['DateTimeOriginal'];
                 }
                 $exif['type'] = 'video';
             } else {
@@ -360,6 +390,7 @@ foreach ($allFolders as $relPath) {
                 'mappedName' => $mapped,
                 'owner' => $owner,
                 'type' => $isVideo ? 'video' : 'image',
+                'filesize' => filesize($srcFile),
             ];
             $dataChanged = true;
             $filesDone++;
@@ -419,6 +450,16 @@ function extractGps($rawExif) {
     $lat = exifGpsToDecimal($rawExif['GPSLatitude'] ?? null, $rawExif['GPSLatitudeRef'] ?? null);
     $lon = exifGpsToDecimal($rawExif['GPSLongitude'] ?? null, $rawExif['GPSLongitudeRef'] ?? null);
     if ($lat !== null && $lon !== null) return ['lat' => $lat, 'lon' => $lon];
+    return null;
+}
+
+function videoDateFromFilename($filename) {
+    // Android: VID_20251013_130938378.mp4 -> local time 2025-10-13 13:09:38
+    if (preg_match('/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/', $filename, $m)) {
+        $dt = "$m[1]-$m[2]-$m[3] $m[4]:$m[5]:$m[6]";
+        $ts = strtotime($dt);
+        if ($ts && $m[1] >= 2000 && $m[1] <= 2099) return $ts;
+    }
     return null;
 }
 
