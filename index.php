@@ -1330,6 +1330,7 @@ const gpsPoints = [];
 cards.forEach((card, idx) => {
     if (card.dataset.gps) {
         const [lat, lon] = card.dataset.gps.split(',').map(Number);
+        if (lat === 0 && lon === 0) return;
         gpsPoints.push({lat, lon, idx, thumb: card.querySelector('img')?.src || ''});
     }
 });

@@ -450,7 +450,7 @@ function extractGps($rawExif) {
     if (!$rawExif) return null;
     $lat = exifGpsToDecimal($rawExif['GPSLatitude'] ?? null, $rawExif['GPSLatitudeRef'] ?? null);
     $lon = exifGpsToDecimal($rawExif['GPSLongitude'] ?? null, $rawExif['GPSLongitudeRef'] ?? null);
-    if ($lat !== null && $lon !== null) return ['lat' => $lat, 'lon' => $lon];
+    if ($lat !== null && $lon !== null && ($lat != 0 || $lon != 0)) return ['lat' => $lat, 'lon' => $lon];
     return null;
 }
 
