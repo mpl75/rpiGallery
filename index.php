@@ -3,7 +3,12 @@ set_time_limit(0);
 putenv('LANG=en_US.UTF-8');
 setlocale(LC_ALL, 'en_US.UTF-8');
 
+header('X-Content-Type-Options: nosniff');
+header('X-Frame-Options: DENY');
+header('Referrer-Policy: strict-origin-when-cross-origin');
+
 session_start();
+$_SESSION['csrf'] ??= bin2hex(random_bytes(32));
 
 $config = json_decode(file_get_contents(__DIR__ . '/config.json'), true);
 
@@ -62,6 +67,15 @@ if (preg_match('#^s/([a-f0-9]+)(/.*)?$#', $path, $m)) {
 if (isset($_GET['action']) && !empty($_SESSION['authenticated'])) {
     header('Content-Type: application/json');
 
+    // CSRF check for state-changing actions
+    $csrfActions = ['crawler-start', 'crawler-stop', 'share-create', 'rename-folder', 'hide-photo'];
+    if (in_array($_GET['action'], $csrfActions)) {
+        if (($_GET['csrf'] ?? '') !== $_SESSION['csrf']) {
+            echo json_encode(['ok' => false, 'msg' => 'Neplatný CSRF token']);
+            exit;
+        }
+    }
+
     switch ($_GET['action']) {
         case 'crawler-start':
             if (empty($_SESSION['admin'])) { echo json_encode(['ok' => false]); exit; }
@@ -87,8 +101,12 @@ if (isset($_GET['action']) && !empty($_SESSION['authenticated'])) {
             exit;
 
         case 'share-create':
-            $sharePath = $_GET['folder'] ?? '';
-            $sharePath = str_replace('..', '', trim($sharePath, '/'));
+            $sharePath = trim($_GET['folder'] ?? '', '/');
+            $shareReal = realpath($rootGallery . '/' . $sharePath);
+            if (!$shareReal || strpos($shareReal, realpath($rootGallery)) !== 0) {
+                echo json_encode(['ok' => false, 'msg' => 'Neplatná cesta']);
+                exit;
+            }
             $days = (int)($_GET['days'] ?? 30);
             if ($days < 1) $days = 30;
             $hash = bin2hex(random_bytes(16));
@@ -118,6 +136,69 @@ if (isset($_GET['action']) && !empty($_SESSION['authenticated'])) {
             $status['running'] = $running;
             echo json_encode($status, JSON_UNESCAPED_UNICODE);
             exit;
+
+        case 'rename-folder':
+            if (empty($_SESSION['admin'])) { echo json_encode(['ok' => false]); exit; }
+            $folderPath = trim($_GET['folder'] ?? '', '/');
+            $newName = $_GET['name'] ?? '';
+            $newName = str_replace(['/', "\0"], '', trim($newName));
+            if (!$folderPath || !$newName) {
+                echo json_encode(['ok' => false, 'msg' => 'Chybí parametry']);
+                exit;
+            }
+            $oldFull = realpath($rootGallery . '/' . $folderPath);
+            if (!$oldFull || strpos($oldFull, realpath($rootGallery)) !== 0 || $oldFull === realpath($rootGallery)) {
+                echo json_encode(['ok' => false, 'msg' => 'Neplatná cesta']);
+                exit;
+            }
+            $parentPath = dirname($folderPath);
+            $newFolderPath = ($parentPath !== '.' ? $parentPath . '/' : '') . $newName;
+            $newFull = realpath($rootGallery) . '/' . $newFolderPath;
+            if (file_exists($newFull)) {
+                echo json_encode(['ok' => false, 'msg' => 'Složka s tímto názvem už existuje']);
+                exit;
+            }
+            if (!@rename($oldFull, $newFull)) {
+                echo json_encode(['ok' => false, 'msg' => 'Přejmenování se nezdařilo']);
+                exit;
+            }
+            // Rename thumbnails and fullsize folders too
+            $oldThumb = $thumbsFolder . '/' . $folderPath;
+            $newThumb = $thumbsFolder . '/' . $newFolderPath;
+            if (is_dir($oldThumb)) @rename($oldThumb, $newThumb);
+            $oldFullsize = $fullsizeFolder . '/' . $folderPath;
+            $newFullsize = $fullsizeFolder . '/' . $newFolderPath;
+            if (is_dir($oldFullsize)) @rename($oldFullsize, $newFullsize);
+            echo json_encode(['ok' => true, 'newPath' => $newFolderPath]);
+            exit;
+
+        case 'hide-photo':
+            if (empty($_SESSION['admin'])) { echo json_encode(['ok' => false]); exit; }
+            $photoFolder = trim($_GET['folder'] ?? '', '/');
+            $photoName = basename($_GET['file'] ?? '');
+            if (!$photoName) {
+                echo json_encode(['ok' => false, 'msg' => 'Chybí název souboru']);
+                exit;
+            }
+            $djDir = realpath($thumbsFolder . ($photoFolder ? '/' . $photoFolder : ''));
+            if (!$djDir || strpos($djDir, realpath($thumbsFolder)) !== 0) {
+                echo json_encode(['ok' => false, 'msg' => 'Neplatná cesta']);
+                exit;
+            }
+            $djPath = $djDir . '/data.json';
+            if (!file_exists($djPath)) {
+                echo json_encode(['ok' => false, 'msg' => 'data.json neexistuje']);
+                exit;
+            }
+            $djData = json_decode(file_get_contents($djPath), true) ?: [];
+            if (!isset($djData[$photoName])) {
+                echo json_encode(['ok' => false, 'msg' => 'Soubor nenalezen v data.json']);
+                exit;
+            }
+            $djData[$photoName]['hidden'] = date('Y-m-d');
+            file_put_contents($djPath, json_encode($djData, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+            echo json_encode(['ok' => true]);
+            exit;
     }
 }
 
@@ -144,28 +225,47 @@ function verifyAuthToken($token, $config) {
 
 if (isset($_GET['logout'])) {
     session_destroy();
-    setcookie('auth', '', time() - 3600, '/', '', true, true);
+    setcookie('auth', '', ['expires' => time() - 3600, 'path' => '/', 'secure' => true, 'httponly' => true, 'samesite' => 'Lax']);
     header('Location: /gallery');
     exit;
 }
 
 if (isset($_POST['login_user'], $_POST['login_pass'])) {
-    $authenticated = false;
-    foreach ($config['users'] as $u) {
-        if ($_POST['login_user'] === $u['user'] && password_verify($_POST['login_pass'], $u['password'])) {
-            $authenticated = true;
-            break;
-        }
-    }
-    if ($authenticated) {
-        $_SESSION['authenticated'] = true;
-        $_SESSION['admin'] = !empty($u['admin']);
-        $token = makeAuthToken($u['user'], !empty($u['admin']), $config);
-        setcookie('auth', $token, time() + 365 * 86400, '/', '', true, true);
-        header('Location: ' . $_SERVER['REQUEST_URI']);
-        exit;
-    } else {
+    if (($_POST['csrf'] ?? '') !== $_SESSION['csrf']) {
         $loginError = true;
+    } else {
+        // Rate limiting
+        $ipHash = hash('sha256', $_SERVER['REMOTE_ADDR'] ?? '');
+        $failFile = '/tmp/gallery_login_fails_' . $ipHash . '.json';
+        $fails = file_exists($failFile) ? (json_decode(file_get_contents($failFile), true) ?: []) : [];
+        $fails = array_filter($fails, fn($t) => $t > time() - 900);
+        if (count($fails) >= 5) {
+            http_response_code(429);
+            echo "Příliš mnoho pokusů. Zkuste to za 15 minut.";
+            exit;
+        }
+
+        $authenticated = false;
+        foreach ($config['users'] as $u) {
+            if ($_POST['login_user'] === $u['user'] && password_verify($_POST['login_pass'], $u['password'])) {
+                $authenticated = true;
+                break;
+            }
+        }
+        if ($authenticated) {
+            session_regenerate_id(true);
+            $_SESSION['csrf'] = bin2hex(random_bytes(32));
+            $_SESSION['authenticated'] = true;
+            $_SESSION['admin'] = !empty($u['admin']);
+            $token = makeAuthToken($u['user'], !empty($u['admin']), $config);
+            setcookie('auth', $token, ['expires' => time() + 365 * 86400, 'path' => '/', 'secure' => true, 'httponly' => true, 'samesite' => 'Lax']);
+            header('Location: ' . $_SERVER['REQUEST_URI']);
+            exit;
+        } else {
+            $fails[] = time();
+            file_put_contents($failFile, json_encode($fails));
+            $loginError = true;
+        }
     }
 }
 
@@ -185,7 +285,6 @@ if (!$isSharedAccess && empty($_SESSION['authenticated'])) {
 
 // --- Path handling ---
 $path = isset($_GET['path']) ? $_GET['path'] : '';
-$path = str_replace('..', '', $path);
 $path = trim($path, '/');
 
 function encodePath($p) {
@@ -202,6 +301,13 @@ function formatDate($dt) {
 }
 
 $fullPath = $rootGallery . ($path ? '/' . $path : '');
+$realRoot = realpath($rootGallery);
+$realFull = realpath($fullPath);
+if ($path && (!$realFull || strpos($realFull, $realRoot . '/') !== 0)) {
+    http_response_code(403);
+    echo "Přístup zamítnut.";
+    exit;
+}
 $baseUrl = '/gallery';
 $shareBaseUrl = $isSharedAccess ? '/gallery/s/' . $shareHash : null;
 
@@ -313,6 +419,11 @@ if (file_exists($dataFile)) {
     unset($data['_version']);
 }
 
+// Filter hidden photos (visible only to no one - admin sees all in data but not in gallery)
+$mediaFiles = array_values(array_filter($mediaFiles, function ($name) use ($data) {
+    return empty($data[$name]['hidden']);
+}));
+
 // Sort by date taken
 usort($mediaFiles, function ($a, $b) use ($data) {
     $dateA = $data[$a]['dateTaken'] ?? '9999';
@@ -351,11 +462,17 @@ if ($continuousView && $folders && !$mediaFiles) {
                 unset($data['_version']);
             }
 
+            $mediaFiles = array_values(array_filter($mediaFiles, function ($name) use ($data) {
+                return empty($data[$name]['hidden']);
+            }));
+
             usort($mediaFiles, function ($a, $b) use ($data) {
                 $dateA = $data[$a]['dateTaken'] ?? '9999';
                 $dateB = $data[$b]['dateTaken'] ?? '9999';
                 return strcmp($dateA, $dateB);
             });
+
+            if (!$mediaFiles) return;
 
             $results[] = [
                 'name' => basename($relPath),
@@ -469,6 +586,7 @@ function showLoginForm($error = false) {
 <body>
 <div class="login-wrap">
     <form method="post" class="login-form">
+        <input type="hidden" name="csrf" value="<?= htmlspecialchars($_SESSION['csrf']) ?>">
         <h2>Galerie</h2>
         <?php if ($error): ?>
             <div class="login-error">Nesprávné přihlašovací údaje</div>
@@ -498,6 +616,7 @@ function showLoginForm($error = false) {
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="stylesheet" href="/rpiGallery/gallery.css">
+    <meta name="csrf-token" content="<?= htmlspecialchars($_SESSION['csrf']) ?>">
 <?php if ($mapyApiKey): ?>
     <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.css">
     <script src="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.js"></script>
@@ -540,6 +659,9 @@ function showLoginForm($error = false) {
 <?php if (!$isSharedAccess): ?>
         <?php if ($path && $mediaFiles): ?>
             <button onclick="shareFolder()" class="btn-share">Sdílet</button>
+        <?php endif; ?>
+        <?php if (!empty($_SESSION['admin']) && $path): ?>
+            <button onclick="renameFolder()" class="btn-share">Přejmenovat</button>
         <?php endif; ?>
 <?php endif; ?>
     </span>
@@ -588,7 +710,7 @@ function showLoginForm($error = false) {
         $mapped = $entry['mappedName'] ?? $name;
         $thumbUrl = $thumbsUrl . '/' . encodePath($album['relPath'] . '/' . $mapped);
     ?>
-        <div class="image-card" data-lb-index="<?= $lbIndex ?>" data-full="<?= htmlspecialchars($fullUrl) ?>" data-type="<?= $isVideo ? 'video' : 'image' ?>" data-exif="<?= htmlspecialchars(json_encode($exif, JSON_UNESCAPED_UNICODE)) ?>"<?php if ($owner): ?> data-owner="<?= htmlspecialchars($owner['name']) ?>"<?php endif; ?><?php if (!empty($exif['gps'])): ?> data-gps="<?= $exif['gps']['lat'] ?>,<?= $exif['gps']['lon'] ?>"<?php endif; ?><?php if (!empty($entry['filesize'])): ?> data-filesize="<?= $entry['filesize'] ?>"<?php endif; ?>>
+        <div class="image-card" data-lb-index="<?= $lbIndex ?>" data-full="<?= htmlspecialchars($fullUrl) ?>" data-type="<?= $isVideo ? 'video' : 'image' ?>" data-name="<?= htmlspecialchars($name) ?>" data-folder="<?= htmlspecialchars($album['relPath']) ?>" data-exif="<?= htmlspecialchars(json_encode($exif, JSON_UNESCAPED_UNICODE)) ?>"<?php if ($owner): ?> data-owner="<?= htmlspecialchars($owner['name']) ?>"<?php endif; ?><?php if (!empty($exif['gps'])): ?> data-gps="<?= $exif['gps']['lat'] ?>,<?= $exif['gps']['lon'] ?>"<?php endif; ?><?php if (!empty($entry['filesize'])): ?> data-filesize="<?= $entry['filesize'] ?>"<?php endif; ?>>
             <div class="thumb-wrap" onclick="openLightbox(<?= $lbIndex ?>)">
                 <img src="<?= htmlspecialchars($thumbUrl) ?>" alt="" loading="lazy">
             </div>
@@ -657,7 +779,7 @@ function showLoginForm($error = false) {
         $mapped = $entry['mappedName'] ?? $name;
         $thumbUrl = $thumbsUrl . '/' . encodePath($path ? $path . '/' . $mapped : $mapped);
     ?>
-        <div class="image-card" data-lb-index="<?= $lbIndex ?>" data-full="<?= htmlspecialchars($fullUrl) ?>" data-type="<?= $isVideo ? 'video' : 'image' ?>" data-exif="<?= htmlspecialchars(json_encode($exif, JSON_UNESCAPED_UNICODE)) ?>"<?php if ($owner): ?> data-owner="<?= htmlspecialchars($owner['name']) ?>"<?php endif; ?><?php if (!empty($exif['gps'])): ?> data-gps="<?= $exif['gps']['lat'] ?>,<?= $exif['gps']['lon'] ?>"<?php endif; ?><?php if (!empty($entry['filesize'])): ?> data-filesize="<?= $entry['filesize'] ?>"<?php endif; ?>>
+        <div class="image-card" data-lb-index="<?= $lbIndex ?>" data-full="<?= htmlspecialchars($fullUrl) ?>" data-type="<?= $isVideo ? 'video' : 'image' ?>" data-name="<?= htmlspecialchars($name) ?>" data-exif="<?= htmlspecialchars(json_encode($exif, JSON_UNESCAPED_UNICODE)) ?>"<?php if ($owner): ?> data-owner="<?= htmlspecialchars($owner['name']) ?>"<?php endif; ?><?php if (!empty($exif['gps'])): ?> data-gps="<?= $exif['gps']['lat'] ?>,<?= $exif['gps']['lon'] ?>"<?php endif; ?><?php if (!empty($entry['filesize'])): ?> data-filesize="<?= $entry['filesize'] ?>"<?php endif; ?>>
             <div class="thumb-wrap" onclick="openLightbox(<?= $lbIndex ?>)">
                 <img src="<?= htmlspecialchars($thumbUrl) ?>" alt="" loading="lazy">
             </div>
@@ -713,6 +835,10 @@ function showLoginForm($error = false) {
 <!-- Lightbox -->
 <div id="lightbox" class="lightbox" onclick="closeLightbox(event)">
     <button class="lb-close" onclick="closeLightbox()">&times;</button>
+    <?php if (!empty($_SESSION['admin'])): ?>
+    <button class="lb-hide" id="btn-hide" onclick="hidePhoto(event)" title="Skrýt fotku"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/><line x1="1" y1="1" x2="23" y2="23"/></svg></button>
+    <?php endif; ?>
+    <button class="lb-slideshow" id="btn-slideshow" onclick="toggleSlideshow(event)"><svg id="ss-icon-play" width="24" height="24" viewBox="0 0 16 16"><polygon points="3,1 13,8 3,15" fill="currentColor"/></svg><svg id="ss-icon-stop" width="24" height="24" viewBox="0 0 16 16" style="display:none"><rect x="2" y="2" width="12" height="12" rx="1" fill="currentColor"/></svg></button>
     <button class="lb-prev" onclick="navigateLightbox(event, -1)">&#10094;</button>
     <button class="lb-next" onclick="navigateLightbox(event, 1)">&#10095;</button>
     <div class="lb-content" onclick="event.stopPropagation()">
@@ -721,12 +847,26 @@ function showLoginForm($error = false) {
         <div id="lb-video-loading" class="lb-video-loading" style="display:none"></div>
         <div id="lb-exif" class="lb-exif"></div>
     </div>
+    <div id="slideshow-bar" class="slideshow-bar" style="display:none" onclick="event.stopPropagation()">
+        <button class="ss-speed-btn" data-sec="3" onclick="setSlideshowDelay(3)">3 s</button>
+        <button class="ss-speed-btn active" data-sec="5" onclick="setSlideshowDelay(5)">5 s</button>
+        <button class="ss-speed-btn" data-sec="8" onclick="setSlideshowDelay(8)">8 s</button>
+        <button class="ss-speed-btn" data-sec="12" onclick="setSlideshowDelay(12)">12 s</button>
+    </div>
 </div>
 <?php if ($mapyApiKey): ?>
 <div id="lb-minimap-wrap" class="lb-minimap-wrap" style="display:none;cursor:pointer" onclick="closeLightbox();openMap()"><div id="lb-minimap" class="lb-minimap"></div></div>
 <?php endif; ?>
 
 <script>
+const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
 // Lightbox
 const cards = document.querySelectorAll('.image-card[data-lb-index]');
 let currentIdx = 0;
@@ -741,6 +881,7 @@ function openLightbox(idx) {
 
 function closeLightbox(e) {
     if (e && e.target !== document.getElementById('lightbox') && !e.target.classList.contains('lb-close')) return;
+    stopSlideshow();
     document.getElementById('lightbox').classList.remove('active');
     document.body.style.overflow = '';
     document.getElementById('lb-img').src = '';
@@ -817,11 +958,19 @@ function showImage() {
             vid.play().catch(() => {});
         }
         vid.addEventListener('canplay', onCanPlay);
+
+        // Slideshow: advance when video ends
+        function onEnded() {
+            vid.removeEventListener('ended', onEnded);
+            if (slideshowActive) slideshowAdvance();
+        }
+        vid.addEventListener('ended', onEnded);
     } else {
         vid.style.display = 'none';
         loading.style.display = 'none';
         img.src = card.dataset.full;
         img.style.display = '';
+        if (slideshowActive) scheduleSlideshowNext();
     }
 
     const exif = JSON.parse(card.dataset.exif);
@@ -836,13 +985,13 @@ function showImage() {
                     String(ts.getHours()).padStart(2,'0') + ':' + String(ts.getMinutes()).padStart(2,'0') + ':' +
                     String(ts.getSeconds()).padStart(2,'0') + '</span>';
             } else {
-                h += '<span>' + d + '</span>';
+                h += '<span>' + escapeHtml(d) + '</span>';
             }
-        } catch(e) { h += '<span>' + d + '</span>'; }
+        } catch(e) { h += '<span>' + escapeHtml(d) + '</span>'; }
     }
-    if (exif.Camera) h += '<span>' + exif.Camera + '</span>';
+    if (exif.Camera) h += '<span>' + escapeHtml(exif.Camera) + '</span>';
     const owner = card.dataset.owner;
-    if (owner) h += '<span>' + owner + '</span>';
+    if (owner) h += '<span>' + escapeHtml(owner) + '</span>';
     const fs = card.dataset.filesize;
     if (fs && card.dataset.type === 'video') {
         const mb = (parseInt(fs) / 1048576).toFixed(0);
@@ -854,12 +1003,68 @@ function showImage() {
     updateMinimap(card.dataset.gps);
 }
 
+// Slideshow
+let slideshowActive = false;
+let slideshowTimer = null;
+let SLIDESHOW_DELAY = 5000;
+
+function toggleSlideshow(e) {
+    if (e) e.stopPropagation();
+    if (slideshowActive) {
+        stopSlideshow();
+    } else {
+        startSlideshow();
+    }
+}
+
+function startSlideshow() {
+    slideshowActive = true;
+    document.getElementById('ss-icon-play').style.display = 'none';
+    document.getElementById('ss-icon-stop').style.display = '';
+    document.getElementById('btn-slideshow').classList.add('active');
+    document.getElementById('slideshow-bar').style.display = 'flex';
+    scheduleSlideshowNext();
+}
+
+function stopSlideshow() {
+    slideshowActive = false;
+    if (slideshowTimer) { clearTimeout(slideshowTimer); slideshowTimer = null; }
+    const btn = document.getElementById('btn-slideshow');
+    document.getElementById('ss-icon-play').style.display = '';
+    document.getElementById('ss-icon-stop').style.display = 'none';
+    btn.classList.remove('active');
+    document.getElementById('slideshow-bar').style.display = 'none';
+}
+
+function setSlideshowDelay(sec) {
+    SLIDESHOW_DELAY = sec * 1000;
+    document.querySelectorAll('.ss-speed-btn').forEach(b => b.classList.toggle('active', parseInt(b.dataset.sec) === sec));
+    if (slideshowActive) scheduleSlideshowNext();
+}
+
+function scheduleSlideshowNext() {
+    if (!slideshowActive) return;
+    if (slideshowTimer) clearTimeout(slideshowTimer);
+    const card = cards[currentIdx];
+    if (card.dataset.type === 'video') {
+        slideshowTimer = null;
+    } else {
+        slideshowTimer = setTimeout(() => slideshowAdvance(), SLIDESHOW_DELAY);
+    }
+}
+
+function slideshowAdvance() {
+    if (!slideshowActive) return;
+    navigateLightbox(null, 1);
+}
+
 // Keyboard
 document.addEventListener('keydown', function(e) {
     if (!document.getElementById('lightbox').classList.contains('active')) return;
     if (e.key === 'Escape') closeLightbox();
-    if (e.key === 'ArrowLeft') navigateLightbox(null, -1);
-    if (e.key === 'ArrowRight') navigateLightbox(null, 1);
+    if (e.key === 'ArrowLeft') { stopSlideshow(); navigateLightbox(null, -1); }
+    if (e.key === 'ArrowRight') { stopSlideshow(); navigateLightbox(null, 1); }
+    if (e.key === ' ') { e.preventDefault(); toggleSlideshow(); }
 });
 
 // Touch swipe
@@ -879,7 +1084,7 @@ lb.addEventListener('touchend', function(e) {
 let crawlerPolling = null;
 
 function crawlerAction(action) {
-    fetch('?action=crawler-' + action)
+    fetch('?action=crawler-' + action + '&csrf=' + encodeURIComponent(csrfToken))
         .then(r => r.json())
         .then(d => { updateCrawlerStatus(); });
 }
@@ -928,7 +1133,7 @@ function shareFolder() {
 }
 
 function createShare(days) {
-    fetch('?action=share-create&folder=<?= rawurlencode($path) ?>&days=' + days)
+    fetch('?action=share-create&folder=<?= rawurlencode($path) ?>&days=' + days + '&csrf=' + encodeURIComponent(csrfToken))
         .then(r => r.json())
         .then(d => {
             if (d.ok) {
@@ -942,6 +1147,41 @@ function copyShareUrl() {
     const input = document.getElementById('share-url');
     input.select();
     navigator.clipboard.writeText(input.value);
+}
+
+// Rename folder
+function renameFolder() {
+    const currentName = <?= json_encode(basename($path)) ?>;
+    const newName = prompt('Nový název složky:', currentName);
+    if (!newName || newName === currentName) return;
+    fetch('?action=rename-folder&folder=' + encodeURIComponent(<?= json_encode($path) ?>) + '&name=' + encodeURIComponent(newName) + '&csrf=' + encodeURIComponent(csrfToken))
+        .then(r => r.json())
+        .then(d => {
+            if (d.ok) {
+                window.location.href = '/gallery/' + d.newPath;
+            } else {
+                alert(d.msg || 'Chyba při přejmenování');
+            }
+        });
+}
+
+// Hide photo
+function hidePhoto(e) {
+    if (e) e.stopPropagation();
+    const card = cards[currentIdx];
+    if (!card) return;
+    const fileName = card.dataset.name;
+    if (!confirm('Opravdu skrýt ' + fileName + '?')) return;
+    const folder = card.dataset.folder || <?= json_encode($path) ?>;
+    fetch('?action=hide-photo&folder=' + encodeURIComponent(folder) + '&file=' + encodeURIComponent(fileName) + '&csrf=' + encodeURIComponent(csrfToken))
+        .then(r => r.json())
+        .then(d => {
+            if (d.ok) {
+                window.location.reload();
+            } else {
+                alert(d.msg || 'Chyba při skrývání');
+            }
+        });
 }
 
 <?php if ($mapyApiKey): ?>

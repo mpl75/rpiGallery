@@ -1,0 +1,3 @@
+<FilesMatch "\.(json|pid|stop)$">
+    Require all denied
+</FilesMatch>
