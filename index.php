@@ -814,6 +814,20 @@ function showLoginForm($error = false) {
 <?php endif; ?>
 
 <?php if ($mediaFiles): ?>
+
+<?php if (!$isSharedAccess && ($prevFolder || $nextFolder)): ?>
+<nav class="folder-nav">
+    <?php if ($prevFolder): ?>
+        <a href="<?= htmlspecialchars($prevFolder['url']) ?>" class="folder-nav-link folder-nav-prev">&laquo; <?= htmlspecialchars($prevFolder['name']) ?></a>
+    <?php else: ?>
+        <span></span>
+    <?php endif; ?>
+    <?php if ($nextFolder): ?>
+        <a href="<?= htmlspecialchars($nextFolder['url']) ?>" class="folder-nav-link folder-nav-next"><?= htmlspecialchars($nextFolder['name']) ?> &raquo;</a>
+    <?php endif; ?>
+</nav>
+<?php endif; ?>
+
 <section class="images">
     <?php
     $lbIndex = 0;
