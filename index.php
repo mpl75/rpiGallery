@@ -7,6 +7,9 @@ header('X-Content-Type-Options: nosniff');
 header('X-Frame-Options: DENY');
 header('Referrer-Policy: strict-origin-when-cross-origin');
 
+ini_set('session.cookie_secure', '1');
+ini_set('session.cookie_httponly', '1');
+ini_set('session.cookie_samesite', 'Lax');
 session_start();
 $_SESSION['csrf'] ??= bin2hex(random_bytes(32));
 
@@ -55,6 +58,8 @@ if (preg_match('#^s/([a-f0-9]+)(/.*)?$#', $path, $m)) {
         // Allow subpath within shared folder
         $subPath = isset($m[2]) ? trim($m[2], '/') : '';
         $_GET['path'] = $sharedPath . ($subPath ? '/' . $subPath : '');
+        // Store shared path in session for thumbnail/fullsize auth
+        $_SESSION['shared_paths'][$sharedPath] = true;
         // Skip auth
     } else {
         http_response_code(404);
@@ -279,7 +284,48 @@ if (empty($_SESSION['authenticated']) && isset($_COOKIE['auth'])) {
 }
 
 if (!$isSharedAccess && empty($_SESSION['authenticated'])) {
-    showLoginForm($loginError ?? false);
+    // Allow thumbnail/fullsize serving if shared paths exist in session
+    if (!isset($_GET['serve']) || empty($_SESSION['shared_paths'])) {
+        showLoginForm($loginError ?? false);
+        exit;
+    }
+}
+
+// --- Serve thumbnails/fullsize with auth ---
+if (isset($_GET['serve']) && isset($_GET['file'])) {
+    $serveType = $_GET['serve'];
+    $serveFile = $_GET['file'];
+    if (!in_array($serveType, ['thumbnails', 'fullsize'])) {
+        http_response_code(403);
+        exit;
+    }
+    $baseDir = $serveType === 'thumbnails' ? $thumbsFolder : $fullsizeFolder;
+    $filePath = realpath($baseDir . '/' . $serveFile);
+    if (!$filePath || strpos($filePath, realpath($baseDir)) !== 0 || !is_file($filePath)) {
+        http_response_code(404);
+        exit;
+    }
+    // Auth check: authenticated user or file is under a shared path
+    $allowed = !empty($_SESSION['authenticated']);
+    if (!$allowed && !empty($_SESSION['shared_paths'])) {
+        foreach ($_SESSION['shared_paths'] as $sp => $_) {
+            if (strpos($serveFile, $sp) === 0) {
+                $allowed = true;
+                break;
+            }
+        }
+    }
+    if (!$allowed) {
+        http_response_code(403);
+        exit;
+    }
+    $ext = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
+    $mimeTypes = ['jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'png' => 'image/png', 'gif' => 'image/gif', 'webp' => 'image/webp'];
+    $mime = $mimeTypes[$ext] ?? 'application/octet-stream';
+    header('Content-Type: ' . $mime);
+    header('Content-Length: ' . filesize($filePath));
+    header('Cache-Control: public, max-age=86400');
+    readfile($filePath);
     exit;
 }
 
@@ -307,6 +353,14 @@ if ($path && (!$realFull || strpos($realFull, $realRoot . '/') !== 0)) {
     http_response_code(403);
     echo "Přístup zamítnut.";
     exit;
+}
+if ($isSharedAccess && $path) {
+    $sharedRoot = realpath($rootGallery . '/' . $sharedPath);
+    if (!$sharedRoot || ($realFull !== $sharedRoot && strpos($realFull, $sharedRoot . '/') !== 0)) {
+        http_response_code(403);
+        echo "Přístup zamítnut.";
+        exit;
+    }
 }
 $baseUrl = '/gallery';
 $shareBaseUrl = $isSharedAccess ? '/gallery/s/' . $shareHash : null;

@@ -1,3 +1,6 @@
 <FilesMatch "\.(json|pid|stop)$">
     Require all denied
 </FilesMatch>
+
+RewriteEngine On
+RewriteRule ^(thumbnails|fullsize)/(.+)$ index.php?serve=$1&file=$2 [L,QSA]
