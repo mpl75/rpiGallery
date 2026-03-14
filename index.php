@@ -145,36 +145,24 @@ if (isset($_GET['action']) && !empty($_SESSION['authenticated'])) {
         case 'rename-folder':
             if (empty($_SESSION['admin'])) { echo json_encode(['ok' => false]); exit; }
             $folderPath = trim($_GET['folder'] ?? '', '/');
-            $newName = $_GET['name'] ?? '';
-            $newName = str_replace(['/', "\0"], '', trim($newName));
+            $newName = trim($_GET['name'] ?? '');
             if (!$folderPath || !$newName) {
                 echo json_encode(['ok' => false, 'msg' => 'Chybí parametry']);
                 exit;
             }
-            $oldFull = realpath($rootGallery . '/' . $folderPath);
-            if (!$oldFull || strpos($oldFull, realpath($rootGallery)) !== 0 || $oldFull === realpath($rootGallery)) {
+            $folderReal = realpath($rootGallery . '/' . $folderPath);
+            if (!$folderReal || strpos($folderReal, realpath($rootGallery)) !== 0 || $folderReal === realpath($rootGallery)) {
                 echo json_encode(['ok' => false, 'msg' => 'Neplatná cesta']);
                 exit;
             }
-            $parentPath = dirname($folderPath);
-            $newFolderPath = ($parentPath !== '.' ? $parentPath . '/' : '') . $newName;
-            $newFull = realpath($rootGallery) . '/' . $newFolderPath;
-            if (file_exists($newFull)) {
-                echo json_encode(['ok' => false, 'msg' => 'Složka s tímto názvem už existuje']);
-                exit;
-            }
-            if (!@rename($oldFull, $newFull)) {
-                echo json_encode(['ok' => false, 'msg' => 'Přejmenování se nezdařilo']);
-                exit;
-            }
-            // Rename thumbnails and fullsize folders too
-            $oldThumb = $thumbsFolder . '/' . $folderPath;
-            $newThumb = $thumbsFolder . '/' . $newFolderPath;
-            if (is_dir($oldThumb)) @rename($oldThumb, $newThumb);
-            $oldFullsize = $fullsizeFolder . '/' . $folderPath;
-            $newFullsize = $fullsizeFolder . '/' . $newFolderPath;
-            if (is_dir($oldFullsize)) @rename($oldFullsize, $newFullsize);
-            echo json_encode(['ok' => true, 'newPath' => $newFolderPath]);
+            // Store display name in data.json (thumbnails folder)
+            $djDir = $thumbsFolder . '/' . $folderPath;
+            if (!is_dir($djDir)) @mkdir($djDir, 0755, true);
+            $djPath = $djDir . '/data.json';
+            $djData = file_exists($djPath) ? (json_decode(file_get_contents($djPath), true) ?: []) : [];
+            $djData['_displayName'] = $newName;
+            file_put_contents($djPath, json_encode($djData, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+            echo json_encode(['ok' => true]);
             exit;
 
         case 'hide-photo':
@@ -338,6 +326,15 @@ function encodePath($p) {
     return implode('/', array_map('rawurlencode', explode('/', $p)));
 }
 
+function getDisplayName($folderName, $folderRelPath, $thumbsFolder) {
+    $djPath = $thumbsFolder . '/' . $folderRelPath . '/data.json';
+    if (file_exists($djPath)) {
+        $dj = json_decode(file_get_contents($djPath), true);
+        if (!empty($dj['_displayName'])) return $dj['_displayName'];
+    }
+    return $folderName;
+}
+
 function formatDate($dt) {
     if (!$dt) return '';
     $ts = strtotime(str_replace(':', '-', substr($dt, 0, 10)) . substr($dt, 10));
@@ -418,7 +415,7 @@ if (is_file($fullPath)) {
 
     $djPath = $thumbsFolder . ($dir ? '/' . $dir : '') . '/data.json';
     $djData = file_exists($djPath) ? (json_decode(file_get_contents($djPath), true) ?: []) : [];
-    unset($djData['_version']);
+    unset($djData['_version'], $djData['_displayName']);
     $mappedName = $djData[$fileName]['mappedName'] ?? $fileName;
 
     $previewFile = $previewDir . '/' . $mappedName;
@@ -470,7 +467,7 @@ $dataFile = $thumbPath . '/data.json';
 $data = [];
 if (file_exists($dataFile)) {
     $data = json_decode(file_get_contents($dataFile), true) ?: [];
-    unset($data['_version']);
+    unset($data['_version'], $data['_displayName']);
 }
 
 // Filter hidden photos (visible only to no one - admin sees all in data but not in gallery)
@@ -513,7 +510,7 @@ if ($continuousView && $folders && !$mediaFiles) {
             $data = [];
             if (file_exists($dataFile)) {
                 $data = json_decode(file_get_contents($dataFile), true) ?: [];
-                unset($data['_version']);
+                unset($data['_version'], $data['_displayName']);
             }
 
             $mediaFiles = array_values(array_filter($mediaFiles, function ($name) use ($data) {
@@ -563,7 +560,8 @@ if ($path) {
     $cumulative = '';
     foreach ($parts as $part) {
         $cumulative .= ($cumulative ? '/' : '') . $part;
-        $breadcrumbs[] = ['name' => $part, 'url' => $baseUrl . '/' . encodePath($cumulative)];
+        $displayPart = getDisplayName($part, $cumulative, $thumbsFolder);
+        $breadcrumbs[] = ['name' => $displayPart, 'url' => $baseUrl . '/' . encodePath($cumulative)];
     }
 }
 
@@ -591,16 +589,18 @@ if ($path) {
             $viewSuffix = $continuousView ? '?view=continuous' : '';
             if ($idx > 0) {
                 $prevName = $siblings[$idx - 1];
+                $prevRelPath = $parentPath ? $parentPath . '/' . $prevName : $prevName;
                 $prevFolder = [
-                    'name' => $prevName,
-                    'url' => $baseUrl . '/' . encodePath($parentPath ? $parentPath . '/' . $prevName : $prevName) . $viewSuffix,
+                    'name' => getDisplayName($prevName, $prevRelPath, $thumbsFolder),
+                    'url' => $baseUrl . '/' . encodePath($prevRelPath) . $viewSuffix,
                 ];
             }
             if ($idx < count($siblings) - 1) {
                 $nextName = $siblings[$idx + 1];
+                $nextRelPath = $parentPath ? $parentPath . '/' . $nextName : $nextName;
                 $nextFolder = [
-                    'name' => $nextName,
-                    'url' => $baseUrl . '/' . encodePath($parentPath ? $parentPath . '/' . $nextName : $nextName) . $viewSuffix,
+                    'name' => getDisplayName($nextName, $nextRelPath, $thumbsFolder),
+                    'url' => $baseUrl . '/' . encodePath($nextRelPath) . $viewSuffix,
                 ];
             }
         }
@@ -663,7 +663,7 @@ function showLoginForm($error = false) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Galerie<?= $path ? ' — ' . htmlspecialchars($path) : '' ?></title>
+    <title>Galerie<?= $path ? ' — ' . htmlspecialchars(getDisplayName(basename($path), $path, $thumbsFolder)) : '' ?></title>
     <link rel="icon" type="image/svg+xml" href="/rpiGallery/favicon.svg">
     <link rel="manifest" href="/rpiGallery/manifest.json">
     <meta name="theme-color" content="#1a1a2e">
@@ -723,7 +723,7 @@ function showLoginForm($error = false) {
 <!-- Share dialog -->
 <div id="share-dialog" class="share-dialog" style="display:none">
     <div class="share-dialog-content">
-        <p>Sdílet složku <strong><?= htmlspecialchars(basename($path)) ?></strong></p>
+        <p>Sdílet složku <strong><?= htmlspecialchars(getDisplayName(basename($path), $path, $thumbsFolder)) ?></strong></p>
         <div class="share-days">
             <button onclick="createShare(7)" class="share-days-btn">7 dní</button>
             <button onclick="createShare(30)" class="share-days-btn">30 dní</button>
@@ -747,7 +747,12 @@ function showLoginForm($error = false) {
 ?>
 <section class="continuous-album">
 <?php
-        $albumDisplayName = (($pos = strpos($album['name'], ' ')) !== false) ? substr($album['name'], $pos + 1) : $album['name'];
+        $albumCustomName = getDisplayName($album['name'], $album['relPath'], $thumbsFolder);
+        if ($albumCustomName !== $album['name']) {
+            $albumDisplayName = $albumCustomName;
+        } else {
+            $albumDisplayName = (($pos = strpos($album['name'], ' ')) !== false) ? substr($album['name'], $pos + 1) : $album['name'];
+        }
         $albumDate = substr($album['name'], 0, 10);
 ?>
     <a href="<?= htmlspecialchars($albumUrl) ?>" class="album-header"><?= htmlspecialchars($albumDisplayName) ?><span class="album-date"><?= htmlspecialchars($albumDate) ?></span></a>
@@ -792,10 +797,13 @@ function showLoginForm($error = false) {
 
 <?php elseif ($folders && !$continuousView): ?>
 <section class="folders">
-    <?php foreach ($folders as $folder): ?>
-        <a class="folder" href="<?= $baseUrl . '/' . encodePath($path ? $path . '/' . $folder : $folder) ?>">
+    <?php foreach ($folders as $folder):
+        $folderRelPath = $path ? $path . '/' . $folder : $folder;
+        $folderDisplay = getDisplayName($folder, $folderRelPath, $thumbsFolder);
+    ?>
+        <a class="folder" href="<?= $baseUrl . '/' . encodePath($folderRelPath) ?>">
             <div class="folder-icon">📁</div>
-            <div class="folder-name"><?= htmlspecialchars($folder) ?></div>
+            <div class="folder-name"><?= htmlspecialchars($folderDisplay) ?></div>
         </a>
     <?php endforeach; ?>
 </section>
@@ -1205,14 +1213,14 @@ function copyShareUrl() {
 
 // Rename folder
 function renameFolder() {
-    const currentName = <?= json_encode(basename($path)) ?>;
+    const currentName = <?= json_encode(getDisplayName(basename($path), $path, $thumbsFolder)) ?>;
     const newName = prompt('Nový název složky:', currentName);
     if (!newName || newName === currentName) return;
     fetch('?action=rename-folder&folder=' + encodeURIComponent(<?= json_encode($path) ?>) + '&name=' + encodeURIComponent(newName) + '&csrf=' + encodeURIComponent(csrfToken))
         .then(r => r.json())
         .then(d => {
             if (d.ok) {
-                window.location.href = '/gallery/' + d.newPath;
+                window.location.reload();
             } else {
                 alert(d.msg || 'Chyba při přejmenování');
             }
