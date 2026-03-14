@@ -930,7 +930,7 @@ function escapeHtml(str) {
 }
 
 // Lightbox
-const cards = document.querySelectorAll('.image-card[data-lb-index]');
+let cards = Array.from(document.querySelectorAll('.image-card[data-lb-index]'));
 let currentIdx = 0;
 let touchStartX = 0;
 
@@ -1239,7 +1239,15 @@ function hidePhoto(e) {
         .then(r => r.json())
         .then(d => {
             if (d.ok) {
-                window.location.reload();
+                const hiddenCard = cards[currentIdx];
+                hiddenCard.style.display = 'none';
+                cards = Array.from(document.querySelectorAll('.image-card[data-lb-index]')).filter(c => c.style.display !== 'none');
+                if (cards.length === 0) {
+                    window.location.reload();
+                    return;
+                }
+                if (currentIdx >= cards.length) currentIdx = cards.length - 1;
+                showImage();
             } else {
                 alert(d.msg || 'Chyba při skrývání');
             }
