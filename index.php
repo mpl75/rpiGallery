@@ -767,7 +767,7 @@ function showLoginForm($error = false) {
         $isVideo = ($entry['type'] ?? 'image') === 'video';
         $fullUrl = $baseUrl . '/' . encodePath($album['relPath'] . '/' . $name);
         $mapped = $entry['mappedName'] ?? $name;
-        $thumbUrl = $thumbsUrl . '/' . encodePath($album['relPath'] . '/' . $mapped);
+        $thumbUrl = '/gallery/?serve=thumbnails&file=' . encodePath($album['relPath'] . '/' . $mapped);
     ?>
         <div class="image-card" data-lb-index="<?= $lbIndex ?>" data-full="<?= htmlspecialchars($fullUrl) ?>" data-type="<?= $isVideo ? 'video' : 'image' ?>" data-name="<?= htmlspecialchars($name) ?>" data-folder="<?= htmlspecialchars($album['relPath']) ?>" data-exif="<?= htmlspecialchars(json_encode($exif, JSON_UNESCAPED_UNICODE)) ?>"<?php if ($owner): ?> data-owner="<?= htmlspecialchars($owner['name']) ?>"<?php endif; ?><?php if (!empty($exif['gps'])): ?> data-gps="<?= $exif['gps']['lat'] ?>,<?= $exif['gps']['lon'] ?>"<?php endif; ?><?php if (!empty($entry['filesize'])): ?> data-filesize="<?= $entry['filesize'] ?>"<?php endif; ?>>
             <div class="thumb-wrap" onclick="openLightbox(<?= $lbIndex ?>)">
@@ -853,7 +853,7 @@ function showLoginForm($error = false) {
         $isVideo = ($entry['type'] ?? 'image') === 'video';
         $fullUrl = ($shareBaseUrl ?? $baseUrl) . '/' . encodePath($isSharedAccess ? $name : ($path ? $path . '/' . $name : $name));
         $mapped = $entry['mappedName'] ?? $name;
-        $thumbUrl = $thumbsUrl . '/' . encodePath($path ? $path . '/' . $mapped : $mapped);
+        $thumbUrl = '/gallery/?serve=thumbnails&file=' . encodePath($path ? $path . '/' . $mapped : $mapped);
     ?>
         <div class="image-card" data-lb-index="<?= $lbIndex ?>" data-full="<?= htmlspecialchars($fullUrl) ?>" data-type="<?= $isVideo ? 'video' : 'image' ?>" data-name="<?= htmlspecialchars($name) ?>" data-exif="<?= htmlspecialchars(json_encode($exif, JSON_UNESCAPED_UNICODE)) ?>"<?php if ($owner): ?> data-owner="<?= htmlspecialchars($owner['name']) ?>"<?php endif; ?><?php if (!empty($exif['gps'])): ?> data-gps="<?= $exif['gps']['lat'] ?>,<?= $exif['gps']['lon'] ?>"<?php endif; ?><?php if (!empty($entry['filesize'])): ?> data-filesize="<?= $entry['filesize'] ?>"<?php endif; ?>>
             <div class="thumb-wrap" onclick="openLightbox(<?= $lbIndex ?>)">

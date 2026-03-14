@@ -160,7 +160,8 @@ foreach ($allFolders as $relPath) {
     if (file_exists($dataFile)) {
         $raw = json_decode(file_get_contents($dataFile), true) ?: [];
         $dataVersion = $raw['_version'] ?? 0;
-        unset($raw['_version']);
+        $displayName = $raw['_displayName'] ?? null;
+        unset($raw['_version'], $raw['_displayName']);
         $data = $raw;
     }
 
@@ -283,7 +284,7 @@ foreach ($allFolders as $relPath) {
         foreach ($toProcess as $name) {
             if (shouldStop()) {
                 if ($dataChanged) {
-                    file_put_contents($dataFile, json_encode(['_version' => $currentVersion] + $data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+                    file_put_contents($dataFile, json_encode(['_version' => $currentVersion] + ($displayName ? ['_displayName' => $displayName] : []) + $data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
                 }
                 writeStatus([
                     'state' => 'stopped',
@@ -396,7 +397,7 @@ foreach ($allFolders as $relPath) {
             $filesDone++;
 
             // Save after each file so progress survives a crash
-            file_put_contents($dataFile, json_encode(['_version' => $currentVersion] + $data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+            file_put_contents($dataFile, json_encode(['_version' => $currentVersion] + ($displayName ? ['_displayName' => $displayName] : []) + $data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
 
             writeStatus([
                 'state' => 'running',
@@ -411,7 +412,7 @@ foreach ($allFolders as $relPath) {
     }
 
     if ($dataChanged) {
-        file_put_contents($dataFile, json_encode(['_version' => $currentVersion] + $data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+        file_put_contents($dataFile, json_encode(['_version' => $currentVersion] + ($displayName ? ['_displayName' => $displayName] : []) + $data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
     }
 
     $processedFolders++;
