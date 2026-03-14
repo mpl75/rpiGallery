@@ -708,14 +708,14 @@ function showLoginForm($error = false) {
     <?php endif; ?>
     <span class="toolbar-right">
         <?php if ($mapyApiKey): ?>
-            <button onclick="openMap()" class="btn-share" id="btn-map" style="display:none">Mapa</button>
+            <button onclick="openMap()" class="btn" id="btn-map" style="display:none">Mapa</button>
         <?php endif; ?>
 <?php if (!$isSharedAccess): ?>
         <?php if ($path && $mediaFiles): ?>
-            <button onclick="shareFolder()" class="btn-share">Sdílet</button>
+            <button onclick="shareFolder()" class="btn">Sdílet</button>
         <?php endif; ?>
         <?php if (!empty($_SESSION['admin']) && $path): ?>
-            <button onclick="renameFolder()" class="btn-share">Přejmenovat</button>
+            <button onclick="renameFolder()" class="btn">Přejmenovat</button>
         <?php endif; ?>
 <?php endif; ?>
     </span>
@@ -755,7 +755,10 @@ function showLoginForm($error = false) {
         }
         $albumDate = substr($album['name'], 0, 10);
 ?>
-    <a href="<?= htmlspecialchars($albumUrl) ?>" class="album-header"><?= htmlspecialchars($albumDisplayName) ?><span class="album-date"><?= htmlspecialchars($albumDate) ?></span></a>
+    <div class="album-header-row">
+        <a href="<?= htmlspecialchars($albumUrl) ?>" class="album-header"><?= htmlspecialchars($albumDisplayName) ?><span class="album-date"><?= htmlspecialchars($albumDate) ?></span></a>
+        <?php if (!empty($_SESSION['admin'])): ?><button class="btn" onclick="renameFolder(<?= htmlspecialchars(json_encode($album['relPath'])) ?>, <?= htmlspecialchars(json_encode($albumDisplayName)) ?>)">Přejmenovat</button><?php endif; ?>
+    </div>
     <div class="images">
     <?php foreach ($album['media'] as $name):
         $entry = $album['data'][$name] ?? null;
@@ -1226,11 +1229,12 @@ function copyShareUrl() {
 }
 
 // Rename folder
-function renameFolder() {
-    const currentName = <?= json_encode(getDisplayName(basename($path), $path, $thumbsFolder)) ?>;
+function renameFolder(folder, currentName) {
+    folder = folder || <?= json_encode($path) ?>;
+    currentName = currentName || <?= json_encode(getDisplayName(basename($path), $path, $thumbsFolder)) ?>;
     const newName = prompt('Nový název složky:', currentName);
     if (!newName || newName === currentName) return;
-    fetch('?action=rename-folder&folder=' + encodeURIComponent(<?= json_encode($path) ?>) + '&name=' + encodeURIComponent(newName) + '&csrf=' + encodeURIComponent(csrfToken))
+    fetch('?action=rename-folder&folder=' + encodeURIComponent(folder) + '&name=' + encodeURIComponent(newName) + '&csrf=' + encodeURIComponent(csrfToken))
         .then(r => r.json())
         .then(d => {
             if (d.ok) {

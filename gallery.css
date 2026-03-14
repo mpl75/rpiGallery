@@ -585,13 +585,18 @@ body {
     gap: 8px;
 }
 
-.toolbar button {
-    padding: 6px 16px;
-    border: none;
+.btn {
+    padding: 6px 14px;
+    border: 1px solid var(--color-border);
     border-radius: 6px;
     font-size: 1rem;
-    font-weight: 600;
     cursor: pointer;
+    background: var(--color-card-hover);
+    color: var(--color-text);
+}
+
+.btn:hover {
+    background: var(--color-border);
 }
 
 /* Pending thumbnail placeholder */
@@ -608,12 +613,6 @@ body {
 
 .image-card-pending {
     opacity: 0.5;
-}
-
-/* Share button */
-.btn-share {
-    background: var(--color-card-hover) !important;
-    color: var(--color-text) !important;
 }
 
 /* Share dialog */
@@ -805,6 +804,12 @@ body {
     font-size: 1rem;
     font-weight: 400;
     color: var(--color-muted);
+}
+
+.album-header-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
 }
 
 .view-toggle {
