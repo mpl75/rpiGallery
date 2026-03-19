@@ -14,6 +14,7 @@ $config = json_decode(file_get_contents(__DIR__ . '/config.json'), true);
 $rootGallery    = rtrim($config['rootGallery'], '/');
 $thumbsFolder   = rtrim($config['thumbnailsFolder'], '/');
 $fullsizeFolder = rtrim($config['fullsizeFolder'], '/');
+$sharedGroup    = $config['group'] ?? null;
 $thumbWidth     = $config['thumbnailWidth'];
 $thumbHeight    = $config['thumbnailHeight'];
 $thumbQuality   = $config['thumbnailQuality'];
@@ -269,8 +270,8 @@ foreach ($allFolders as $relPath) {
         $foldersWithNewFiles++;
         $totalNewFiles += count($toProcess);
 
-        if (!is_dir($thumbDir)) mkdir($thumbDir, 0755, true);
-        if (!is_dir($fsDir)) mkdir($fsDir, 0755, true);
+        if (!is_dir($thumbDir)) mkdirShared($thumbDir);
+        if (!is_dir($fsDir)) mkdirShared($fsDir);
 
         // Build used names map
         $usedNames = [];
@@ -470,6 +471,23 @@ function dateToFilename($dt) {
     if (!$ts) { $ts = strtotime($dt); }
     if (!$ts) return null;
     return date('Y-m-d_H-i-s', $ts);
+}
+
+function mkdirShared($path) {
+    global $sharedGroup;
+    mkdir($path, 0775, true);
+    if ($sharedGroup) {
+        // Set group and setgid on all newly created directories in the path
+        $parts = explode('/', $path);
+        $current = '';
+        foreach ($parts as $part) {
+            $current .= $part . '/';
+            if (is_dir($current)) {
+                @chgrp($current, $sharedGroup);
+                @chmod($current, 02775);
+            }
+        }
+    }
 }
 
 function generateThumbnail($src, $dst, $maxW, $maxH, $quality, $orientation = 1) {
