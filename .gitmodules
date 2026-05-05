@@ -1,0 +1,3 @@
+[submodule "classStorage"]
+	path = classStorage
+	url = https://github.com/triobo-ltd/classStorage

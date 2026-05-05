@@ -26,6 +26,42 @@ $imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
 $videoExts = $config['videoExtensions'] ?? [];
 $allExts = array_merge($imageExts, $videoExts);
 
+// Initialize Azure backup if configured. Note: classStorage sets timezone to GMT
+// at file load (required for Azure auth signatures); leave it that way thereafter.
+$azureStorage = null;
+$azureContainer = null;
+$azureTier = 'Archive';
+if (!empty($config['azureBackup']['connectionString'])) {
+    require_once __DIR__ . '/classStorage/classStorage.php';
+    $azureStorage = new Storage($config['azureBackup']['connectionString'], true);
+    $azureContainer = $config['azureBackup']['container'] ?? 'archiv';
+    $azureTier = $config['azureBackup']['tier'] ?? 'Archive';
+    // Idempotent: returns ContainerAlreadyExists error if it exists, that is fine
+    $azureStorage->createContainer($azureContainer);
+}
+
+function backupContentType($name) {
+    $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+    return [
+        'jpg'  => 'image/jpeg',
+        'jpeg' => 'image/jpeg',
+        'png'  => 'image/png',
+        'gif'  => 'image/gif',
+        'webp' => 'image/webp',
+        'mp4'  => 'video/mp4',
+    ][$ext] ?? 'application/octet-stream';
+}
+
+// Encode each path segment so spaces and diacritics survive HTTP transport to Azure.
+function encodeBlobPath($path) {
+    return implode('/', array_map('rawurlencode', explode('/', $path)));
+}
+
+function backupLog($status, $blob, $detail = '') {
+    $line = sprintf("%s  %-4s  %s%s\n", gmdate('Y-m-d H:i:s'), $status, $blob, $detail ? "  $detail" : '');
+    @file_put_contents(__DIR__ . '/backup.log', $line, FILE_APPEND);
+}
+
 // Build UID -> user info map
 $uidMap = [];
 foreach ($config['users'] as $u) {
@@ -202,7 +238,18 @@ foreach ($allFolders as $relPath) {
         }
     }
 
-    if (!$toProcess && !$toRefresh && !$dataChanged) {
+    // Decide if backup pass is needed: any media file in this folder lacks 'backedUp'
+    $needsBackup = false;
+    if ($azureStorage) {
+        foreach ($mediaFiles as $name) {
+            if (isset($data[$name]) && empty($data[$name]['backedUp'])) {
+                $needsBackup = true;
+                break;
+            }
+        }
+    }
+
+    if (!$toProcess && !$toRefresh && !$dataChanged && !$needsBackup) {
         $processedFolders++;
         continue;
     }
@@ -409,6 +456,33 @@ foreach ($allFolders as $relPath) {
                 'foldersWithNewFiles' => $foldersWithNewFiles,
                 'totalNewFiles' => $totalNewFiles,
             ]);
+        }
+    }
+
+    // Azure backup: upload any media files in this folder that aren't yet backed up.
+    // Crash-resilient: data.json saved after each file. Failures are logged and retried next run.
+    if ($azureStorage) {
+        foreach ($mediaFiles as $name) {
+            if (shouldStop()) break;
+            if (!isset($data[$name]) || !empty($data[$name]['backedUp'])) continue;
+            $srcFile = $srcDir . '/' . $name;
+            if (!file_exists($srcFile)) continue;
+
+            $relBlob = ($relPath ? $relPath . '/' : '') . $name;
+            $blobPath = encodeBlobPath($relBlob);
+            $size = filesize($srcFile);
+            $t0 = microtime(true);
+            $result = $azureStorage->uploadFile($azureContainer, $blobPath, $srcFile, backupContentType($name));
+            if (empty($result['success'])) {
+                backupLog('FAIL', $relBlob, '(' . ($result['errorCode'] ?? 'unknown') . ', http ' . ($result['httpCode'] ?? '?') . ')');
+                continue;
+            }
+            $azureStorage->setBlobTier($azureContainer, $blobPath, $azureTier);
+            $elapsed = round(microtime(true) - $t0, 1);
+            backupLog('OK', $relBlob, '(' . round($size / 1048576, 1) . ' MB, ' . $elapsed . 's)');
+            $data[$name]['backedUp'] = gmdate('Y-m-d\TH:i:s\Z');
+            $dataChanged = true;
+            file_put_contents($dataFile, json_encode(['_version' => $currentVersion] + ($displayName ? ['_displayName' => $displayName] : []) + $data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
         }
     }
 

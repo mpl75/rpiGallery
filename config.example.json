@@ -11,6 +11,11 @@
     "fullHeight": 1080,
     "fullQuality": 90,
     "group": "doma",
+    "azureBackup": {
+        "connectionString": "DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net",
+        "container": "archiv",
+        "tier": "Archive"
+    },
     "users": [
         {"user": "you@example.com", "password": "$2y$10$your-bcrypt-hash-here", "name": "Your Name", "initials": "YN", "uid": 1000}
     ]

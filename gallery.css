@@ -236,6 +236,22 @@ body {
     border-radius: 4px;
 }
 
+.cloud-badge {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: inline-flex;
+    align-items: center;
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
+    padding: 3px 5px;
+    border-radius: 4px;
+}
+
+.image-card[data-type="video"] .cloud-badge {
+    top: 38px;
+}
+
 .image-info {
     position: absolute;
     bottom: 6px;

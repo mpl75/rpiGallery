@@ -779,6 +779,9 @@ function showLoginForm($error = false) {
             <?php if ($isVideo): ?>
                 <span class="video-badge">&#9654;</span>
             <?php endif; ?>
+            <?php if (!empty($entry['backedUp'])): ?>
+                <span class="cloud-badge" title="Zalohovano <?= htmlspecialchars($entry['backedUp']) ?>"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4c-2.88 0-5.39 1.62-6.62 4C2.45 8.36 0 11.06 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.36-1.64-4.34-3.85-4.96z"/></svg></span>
+            <?php endif; ?>
             <?php if ($showOwnerBadge && $owner): ?>
                 <span class="owner-badge"><?= htmlspecialchars($owner['initials']) ?></span>
             <?php endif; ?>
@@ -864,6 +867,9 @@ function showLoginForm($error = false) {
             </div>
             <?php if ($isVideo): ?>
                 <span class="video-badge">&#9654;</span>
+            <?php endif; ?>
+            <?php if (!empty($entry['backedUp'])): ?>
+                <span class="cloud-badge" title="Zalohovano <?= htmlspecialchars($entry['backedUp']) ?>"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4c-2.88 0-5.39 1.62-6.62 4C2.45 8.36 0 11.06 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.36-1.64-4.34-3.85-4.96z"/></svg></span>
             <?php endif; ?>
             <?php if ($showOwnerBadge && $owner): ?>
                 <span class="owner-badge"><?= htmlspecialchars($owner['initials']) ?></span>
