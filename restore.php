@@ -95,12 +95,12 @@ function cmdRehydrate($s, $c, $prefix) {
             continue;
         }
         $r = $s->setBlobTier($c, encodeBlobPath($name), 'Cool');
-        if (!empty($r['success'])) {
+        if (tierChangeOk($r)) {
             $requested++;
             echo "REQUESTED: $name\n";
         } else {
             $failed++;
-            echo "FAILED: $name (" . ($r['errorCode'] ?? 'unknown') . ")\n";
+            echo "FAILED: $name (http " . ($r['httpCode'] ?? '?') . ", " . ($r['errorCode'] ?? 'unknown') . ")\n";
         }
     }
     echo "\nRequested: $requested, Skipped (not Archive or already pending): $skipped, Failed: $failed\n";
@@ -129,6 +129,11 @@ function cmdStatus($s, $c, $prefix) {
     }
 }
 
+// Set Blob Tier returns 200 (immediate) or 202 (movement started); both are success.
+function tierChangeOk($r) {
+    return in_array($r['httpCode'] ?? 0, [200, 202], true);
+}
+
 function cmdArchive($s, $c, $prefix) {
     $blobs = $s->getListOfBlobsByPrefix($c, $prefix);
     $moved = 0;
@@ -142,12 +147,12 @@ function cmdArchive($s, $c, $prefix) {
             continue;
         }
         $r = $s->setBlobTier($c, encodeBlobPath($name), 'Archive');
-        if (!empty($r['success'])) {
+        if (tierChangeOk($r)) {
             $moved++;
             echo "ARCHIVED: $name\n";
         } else {
             $failed++;
-            echo "FAILED: $name (" . ($r['errorCode'] ?? 'unknown') . ")\n";
+            echo "FAILED: $name (http " . ($r['httpCode'] ?? '?') . ", " . ($r['errorCode'] ?? 'unknown') . ")\n";
         }
     }
     echo "\nArchived: $moved, Skipped (already Archive): $skipped, Failed: $failed\n";
