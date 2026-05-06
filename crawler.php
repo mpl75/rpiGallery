@@ -498,13 +498,19 @@ foreach ($allFolders as $relPath) {
             $result = $azureStorage->uploadFile($azureContainer, $blobPath, $srcFile, backupContentType($name));
 
             if (empty($result['success'])) {
-                // 409 Conflict means the blob already exists (possibly in Archive tier where
-                // overwrite is not permitted). Trust it and mark as backed up.
+                // 409 Conflict means the blob already exists. Verify size matches before
+                // accepting it as backed up (guards against truncated/wrong-version blobs).
                 if (($result['httpCode'] ?? 0) === 409) {
-                    backupLog('SKIP', $relBlob, '(already in Azure, http 409)');
-                    $data[$name]['backedUp'] = gmdate('Y-m-d\TH:i:s\Z');
-                    $dataChanged = true;
-                    file_put_contents($dataFile, json_encode(['_version' => $currentVersion] + ($displayName ? ['_displayName' => $displayName] : []) + $data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+                    $head = $azureStorage->getBlobProperties($azureContainer, $blobPath);
+                    $existingSize = (int)($head['headers']['Content-Length'] ?? 0);
+                    if (!empty($head['success']) && $existingSize === $size) {
+                        backupLog('SKIP', $relBlob, '(already in Azure, ' . round($size / 1048576, 1) . ' MB)');
+                        $data[$name]['backedUp'] = gmdate('Y-m-d\TH:i:s\Z');
+                        $dataChanged = true;
+                        file_put_contents($dataFile, json_encode(['_version' => $currentVersion] + ($displayName ? ['_displayName' => $displayName] : []) + $data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+                        continue;
+                    }
+                    backupLog('FAIL', $relBlob, '(409 conflict, blob ' . $existingSize . ' B vs local ' . $size . ' B)');
                     continue;
                 }
                 backupLog('FAIL', $relBlob, '(' . ($result['errorCode'] ?? 'unknown') . ', http ' . ($result['httpCode'] ?? '?') . ')');
