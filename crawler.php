@@ -31,11 +31,13 @@ $allExts = array_merge($imageExts, $videoExts);
 $azureStorage = null;
 $azureContainer = null;
 $azureTier = 'Archive';
+$azureMaxSize = 0;
 if (!empty($config['azureBackup']['connectionString'])) {
     require_once __DIR__ . '/classStorage/classStorage.php';
     $azureStorage = new Storage($config['azureBackup']['connectionString'], true);
     $azureContainer = $config['azureBackup']['container'] ?? 'archiv';
     $azureTier = $config['azureBackup']['tier'] ?? 'Archive';
+    $azureMaxSize = (int)($config['azureBackup']['maxSizeMB'] ?? 0) * 1048576;
     // Idempotent: returns ContainerAlreadyExists error if it exists, that is fine
     $azureStorage->createContainer($azureContainer);
 }
@@ -138,6 +140,10 @@ $allFolders[] = '';
 
 $totalFolders = count($allFolders);
 
+if ($azureStorage) {
+    backupLog('====', '----- crawler START (' . $totalFolders . ' folders to scan) -----');
+}
+
 writeStatus([
     'state' => 'running',
     'totalFolders' => $totalFolders,
@@ -161,6 +167,9 @@ foreach ($allFolders as $relPath) {
             'foldersWithNewFiles' => $foldersWithNewFiles,
             'totalNewFiles' => $totalNewFiles,
         ]);
+        if ($azureStorage) {
+            backupLog('====', '----- crawler STOPPED -----');
+        }
         exit(0);
     }
 
@@ -238,11 +247,11 @@ foreach ($allFolders as $relPath) {
         }
     }
 
-    // Decide if backup pass is needed: any media file in this folder lacks 'backedUp'
+    // Decide if backup pass is needed: any media file in this folder lacks both 'backedUp' and 'backupSkipped'
     $needsBackup = false;
     if ($azureStorage) {
         foreach ($mediaFiles as $name) {
-            if (isset($data[$name]) && empty($data[$name]['backedUp'])) {
+            if (isset($data[$name]) && empty($data[$name]['backedUp']) && empty($data[$name]['backupSkipped'])) {
                 $needsBackup = true;
                 break;
             }
@@ -342,6 +351,9 @@ foreach ($allFolders as $relPath) {
                     'foldersWithNewFiles' => $foldersWithNewFiles,
                     'totalNewFiles' => $totalNewFiles,
                 ]);
+                if ($azureStorage) {
+                    backupLog('====', '----- crawler STOPPED -----');
+                }
                 exit(0);
             }
 
@@ -464,19 +476,41 @@ foreach ($allFolders as $relPath) {
     if ($azureStorage) {
         foreach ($mediaFiles as $name) {
             if (shouldStop()) break;
-            if (!isset($data[$name]) || !empty($data[$name]['backedUp'])) continue;
+            if (!isset($data[$name])) continue;
+            if (!empty($data[$name]['backedUp']) || !empty($data[$name]['backupSkipped'])) continue;
+
             $srcFile = $srcDir . '/' . $name;
             if (!file_exists($srcFile)) continue;
-
-            $relBlob = ($relPath ? $relPath . '/' : '') . $name;
-            $blobPath = encodeBlobPath($relBlob);
             $size = filesize($srcFile);
+            $relBlob = ($relPath ? $relPath . '/' : '') . $name;
+
+            // Honor max-size limit (e.g. skip videos over 1 GB)
+            if ($azureMaxSize > 0 && $size > $azureMaxSize) {
+                backupLog('SKIP', $relBlob, '(too large, ' . round($size / 1048576, 1) . ' MB)');
+                $data[$name]['backupSkipped'] = 'size:' . $size;
+                $dataChanged = true;
+                file_put_contents($dataFile, json_encode(['_version' => $currentVersion] + ($displayName ? ['_displayName' => $displayName] : []) + $data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+                continue;
+            }
+
+            $blobPath = encodeBlobPath($relBlob);
             $t0 = microtime(true);
             $result = $azureStorage->uploadFile($azureContainer, $blobPath, $srcFile, backupContentType($name));
+
             if (empty($result['success'])) {
+                // 409 Conflict means the blob already exists (possibly in Archive tier where
+                // overwrite is not permitted). Trust it and mark as backed up.
+                if (($result['httpCode'] ?? 0) === 409) {
+                    backupLog('SKIP', $relBlob, '(already in Azure, http 409)');
+                    $data[$name]['backedUp'] = gmdate('Y-m-d\TH:i:s\Z');
+                    $dataChanged = true;
+                    file_put_contents($dataFile, json_encode(['_version' => $currentVersion] + ($displayName ? ['_displayName' => $displayName] : []) + $data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+                    continue;
+                }
                 backupLog('FAIL', $relBlob, '(' . ($result['errorCode'] ?? 'unknown') . ', http ' . ($result['httpCode'] ?? '?') . ')');
                 continue;
             }
+
             $azureStorage->setBlobTier($azureContainer, $blobPath, $azureTier);
             $elapsed = round(microtime(true) - $t0, 1);
             backupLog('OK', $relBlob, '(' . round($size / 1048576, 1) . ' MB, ' . $elapsed . 's)');
@@ -501,6 +535,10 @@ writeStatus([
     'foldersWithNewFiles' => $foldersWithNewFiles,
     'totalNewFiles' => $totalNewFiles,
 ]);
+
+if ($azureStorage) {
+    backupLog('====', '----- crawler DONE -----');
+}
 
 // --- Helper functions ---
 
