@@ -197,10 +197,18 @@ if (isset($_GET['action']) && !empty($_SESSION['authenticated'])) {
 
 // --- Authentication ---
 // Auth token: HMAC-signed cookie, independent of PHP sessions
-function makeAuthToken($user, $admin, $config) {
-    $secret = $config['users'][0]['password']; // use first bcrypt hash as HMAC key
-    $payload = $user . '|' . ($admin ? '1' : '0');
-    $sig = hash_hmac('sha256', $payload, $secret);
+const TOKEN_TTL = 90 * 86400; // 90 dní
+
+// Dedicated random HMAC key from config; fallback to first user's hash for compatibility
+function authSecret($config) {
+    $s = $config['authSecret'] ?? '';
+    return $s !== '' ? $s : ($config['users'][0]['password'] ?? 'x');
+}
+
+function makeAuthToken($user, $config) {
+    $exp = time() + TOKEN_TTL;
+    $payload = $user . '|' . $exp;
+    $sig = hash_hmac('sha256', $payload, authSecret($config));
     return base64_encode($payload . '|' . $sig);
 }
 
@@ -209,11 +217,16 @@ function verifyAuthToken($token, $config) {
     if (!$decoded) return null;
     $parts = explode('|', $decoded);
     if (count($parts) !== 3) return null;
-    [$user, $admin, $sig] = $parts;
-    $secret = $config['users'][0]['password'];
-    $expected = hash_hmac('sha256', $user . '|' . $admin, $secret);
-    if (!hash_equals($expected, $sig)) return null;
-    return ['user' => $user, 'admin' => $admin === '1'];
+    [$user, $exp, $sig] = $parts;
+    $expected = hash_hmac('sha256', $user . '|' . $exp, authSecret($config));
+    if (!hash_equals($expected, $sig)) return null;   // špatný podpis
+    if ((int)$exp < time()) return null;              // expirovaný token
+    foreach ($config['users'] as $u) {                // uživatel musí existovat
+        if (($u['user'] ?? null) === $user) {
+            return ['user' => $user, 'admin' => !empty($u['admin'])];
+        }
+    }
+    return null;
 }
 
 if (isset($_GET['logout'])) {
@@ -250,8 +263,8 @@ if (isset($_POST['login_user'], $_POST['login_pass'])) {
             $_SESSION['csrf'] = bin2hex(random_bytes(32));
             $_SESSION['authenticated'] = true;
             $_SESSION['admin'] = !empty($u['admin']);
-            $token = makeAuthToken($u['user'], !empty($u['admin']), $config);
-            setcookie('auth', $token, ['expires' => time() + 365 * 86400, 'path' => '/', 'secure' => true, 'httponly' => true, 'samesite' => 'Lax']);
+            $token = makeAuthToken($u['user'], $config);
+            setcookie('auth', $token, ['expires' => time() + TOKEN_TTL, 'path' => '/', 'secure' => true, 'httponly' => true, 'samesite' => 'Lax']);
             header('Location: ' . $_SERVER['REQUEST_URI']);
             exit;
         } else {
