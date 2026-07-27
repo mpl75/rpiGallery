@@ -10,7 +10,9 @@
     "fullWidth": 1920,
     "fullHeight": 1080,
     "fullQuality": 90,
-    "group": "doma",
+    "group": "rpiGallery",
+    "inboxFolder": "Inbox",
+    "archiveNesting": ["Y", "Y-m"],
     "authSecret": "GENERATE_WITH_bin2hex_random_bytes_32",
     "azureBackup": {
         "connectionString": "DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net",

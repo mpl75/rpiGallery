@@ -15,6 +15,8 @@ $rootGallery    = rtrim($config['rootGallery'], '/');
 $thumbsFolder   = rtrim($config['thumbnailsFolder'], '/');
 $fullsizeFolder = rtrim($config['fullsizeFolder'], '/');
 $sharedGroup    = $config['group'] ?? null;
+$inboxFolder    = $config['inboxFolder'] ?? '';
+$archiveNesting = $config['archiveNesting'] ?? ['Y', 'Y-m'];
 $thumbWidth     = $config['thumbnailWidth'];
 $thumbHeight    = $config['thumbnailHeight'];
 $thumbQuality   = $config['thumbnailQuality'];
@@ -131,8 +133,17 @@ function collectFolders($dir, $relative = '') {
     return $result;
 }
 
+// Auto-file anything dropped into the Inbox before scanning (so new albums are included)
+processInbox();
+
 // Sort folders: newest first (by folder name, works for date-named folders)
 $allFolders = collectFolders($rootGallery);
+// Never treat the Inbox itself as a gallery album
+if ($inboxFolder) {
+    $allFolders = array_values(array_filter($allFolders, function ($f) use ($inboxFolder) {
+        return $f !== $inboxFolder && strpos($f, $inboxFolder . '/') !== 0;
+    }));
+}
 rsort($allFolders, SORT_LOCALE_STRING);
 
 // Add root folder at the end
@@ -606,6 +617,168 @@ function mkdirShared($path) {
             }
         }
     }
+}
+
+// --- Inbox auto-filing ---
+// Drains rootGallery/<inboxFolder> into the dated archive structure. Runs as the crawler
+// user (www-data), never root: it creates destination album dirs (owned www-data, group =
+// shared group inherited via setgid) and moves media in with rename() (preserving each
+// file's original owner, e.g. michal/sarka). Group of moved files is left as-is (a non-owner
+// cannot chgrp) — fine for viewing/managing, since folder perms are what grant shared access.
+function processInbox() {
+    global $rootGallery, $inboxFolder, $allExts;
+    if (!$inboxFolder) return;
+    $inboxPath = $rootGallery . '/' . $inboxFolder;
+    if (!is_dir($inboxPath)) return;
+
+    $entries = @scandir($inboxPath);
+    if (!$entries) return;
+
+    foreach ($entries as $entry) {
+        if ($entry[0] === '.') continue;
+        $src = $inboxPath . '/' . $entry;
+
+        if (is_dir($src)) {
+            // Subfolder = one album, named after the subfolder.
+            $ts = inboxDate($src, $entry);
+            if (!$ts) { inboxLog('SKIP', $entry, '(nelze urcit datum)'); continue; }
+            $albumName = preg_match('/^\d{4}-\d{2}-\d{2}/', $entry) ? $entry : date('Y-m-d', $ts) . ' ' . $entry;
+
+            if (is_writable($src)) {
+                // Preferred: drain files into a fresh www-data-owned dir (correct shared group).
+                $dest = archiveAlbumDir($ts, $albumName);
+                [$m, $s] = drainMedia($src, $dest);
+                removeIfEmpty($src);
+                inboxLog('OK', $entry, "-> $albumName ($m souboru" . ($s ? ", $s preskoceno" : '') . ')');
+            } else {
+                // Foreign folder moved in wholesale: cannot write inside it, so move the whole
+                // folder (works via parent perms). Files land + are viewable; the album dir keeps
+                // its source group (www-data cannot chgrp a dir it does not own).
+                $dest = archiveParentDir($ts) . '/' . $albumName;
+                if (file_exists($dest)) { inboxLog('SKIP', $entry, "(cil uz existuje: $albumName)"); continue; }
+                if (@rename($src, $dest)) inboxLog('MOVE', $entry, "-> $albumName (cela slozka, prava zdroje)");
+                else inboxLog('FAIL', $entry, '(presun slozky selhal)');
+            }
+        } else {
+            // Loose media file in the inbox root: merge into an existing album for that date
+            // (e.g. "2026-07-24 Kempování") if one exists; otherwise a bare date album.
+            $ext = strtolower(pathinfo($entry, PATHINFO_EXTENSION));
+            if (!in_array($ext, $allExts)) continue;
+            $ts = mediaTimestamp($src, $entry, $ext);
+            if (!$ts) { inboxLog('SKIP', $entry, '(nelze urcit datum)'); continue; }
+            $dateStr = date('Y-m-d', $ts);
+            $dest = findExistingAlbum($ts, $dateStr) ?? archiveAlbumDir($ts, $dateStr);
+            $albumName = basename($dest);
+            $target = $dest . '/' . $entry;
+            if (file_exists($target)) { inboxLog('SKIP', $entry, '(cil uz existuje)'); continue; }
+            if (@rename($src, $target)) inboxLog('OK', $entry, "-> $albumName");
+            else inboxLog('FAIL', $entry, '(presun selhal)');
+        }
+    }
+}
+
+// Build (and create if missing) the parent path from archiveNesting date-format segments.
+function archiveParentDir($ts) {
+    global $rootGallery, $archiveNesting;
+    $parent = $rootGallery;
+    foreach ($archiveNesting as $fmt) $parent .= '/' . date($fmt, $ts);
+    if (!is_dir($parent)) mkdirShared($parent);
+    return $parent;
+}
+
+function archiveAlbumDir($ts, $albumName) {
+    $dest = archiveParentDir($ts) . '/' . $albumName;
+    if (!is_dir($dest)) mkdirShared($dest);
+    return $dest;
+}
+
+// Find an existing album in this date's parent whose name starts with the date
+// ("2026-07-24", "2026-07-24 Kempování", "2026-07-24a" — but not "2026-07-240...").
+// Returns the first writable match (alphabetical), or null if none usable. Does not create.
+function findExistingAlbum($ts, $dateStr) {
+    global $rootGallery, $archiveNesting;
+    $parent = $rootGallery;
+    foreach ($archiveNesting as $fmt) $parent .= '/' . date($fmt, $ts);
+    if (!is_dir($parent)) return null;
+
+    $matches = [];
+    foreach (@scandir($parent) ?: [] as $d) {
+        if ($d[0] === '.') continue;
+        if (!is_dir($parent . '/' . $d)) continue;
+        if ($d === $dateStr || (strpos($d, $dateStr) === 0 && !ctype_digit(substr($d, strlen($dateStr), 1)))) {
+            $matches[] = $d;
+        }
+    }
+    if (!$matches) return null;
+    sort($matches, SORT_LOCALE_STRING);
+    foreach ($matches as $d) {
+        if (is_writable($parent . '/' . $d)) return $parent . '/' . $d;
+    }
+    return null; // matches exist but none writable -> caller falls back to a bare date album
+}
+
+function drainMedia($srcDir, $destDir) {
+    global $allExts;
+    $moved = 0; $skipped = 0;
+    foreach (@scandir($srcDir) ?: [] as $f) {
+        if ($f[0] === '.') continue;
+        $sp = $srcDir . '/' . $f;
+        if (is_dir($sp)) continue;
+        $ext = strtolower(pathinfo($f, PATHINFO_EXTENSION));
+        if (!in_array($ext, $allExts)) continue;
+        $target = $destDir . '/' . $f;
+        if (file_exists($target)) { $skipped++; continue; }
+        if (@rename($sp, $target)) $moved++; else $skipped++;
+    }
+    return [$moved, $skipped];
+}
+
+function removeIfEmpty($dir) {
+    foreach (array_diff(@scandir($dir) ?: [], ['.', '..']) as $f) {
+        if ($f === '.DS_Store' || $f === 'Thumbs.db') @unlink($dir . '/' . $f);
+    }
+    if (!array_diff(@scandir($dir) ?: [], ['.', '..'])) @rmdir($dir);
+}
+
+// Album date: leading yyyy-mm-dd in the folder name, else earliest media date inside.
+function inboxDate($srcDir, $name) {
+    if (preg_match('/^(\d{4})-(\d{2})-(\d{2})/', $name, $m)) {
+        $ts = strtotime("$m[1]-$m[2]-$m[3]");
+        if ($ts) return $ts;
+    }
+    global $allExts;
+    $earliest = null;
+    foreach (@scandir($srcDir) ?: [] as $f) {
+        if ($f[0] === '.') continue;
+        $sp = $srcDir . '/' . $f;
+        if (is_dir($sp)) continue;
+        $ext = strtolower(pathinfo($f, PATHINFO_EXTENSION));
+        if (!in_array($ext, $allExts)) continue;
+        $ts = mediaTimestamp($sp, $f, $ext);
+        if ($ts && ($earliest === null || $ts < $earliest)) $earliest = $ts;
+    }
+    return $earliest;
+}
+
+function mediaTimestamp($file, $name, $ext) {
+    global $videoExts;
+    if (in_array($ext, ['jpg', 'jpeg']) && function_exists('exif_read_data')) {
+        $ex = @exif_read_data($file, 'EXIF', false);
+        if ($ex && !empty($ex['DateTimeOriginal'])) {
+            $ts = strtotime(str_replace(':', '-', substr($ex['DateTimeOriginal'], 0, 10)) . substr($ex['DateTimeOriginal'], 10));
+            if ($ts) return $ts;
+        }
+    }
+    if (in_array($ext, $videoExts)) {
+        $ts = videoDateFromFilename($name);
+        if ($ts) return $ts;
+    }
+    return @filemtime($file) ?: null;
+}
+
+function inboxLog($status, $item, $detail = '') {
+    $line = sprintf("%s  %-4s  %s%s\n", date('Y-m-d H:i:s'), $status, $item, $detail ? "  $detail" : '');
+    @file_put_contents(__DIR__ . '/inbox.log', $line, FILE_APPEND);
 }
 
 function generateThumbnail($src, $dst, $maxW, $maxH, $quality, $orientation = 1) {

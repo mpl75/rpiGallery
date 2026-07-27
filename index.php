@@ -28,6 +28,7 @@ $showOwnerBadge = $config['showOwnerBadge'] ?? true;
 $imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
 $videoExts = $config['videoExtensions'] ?? [];
 $allExts = array_merge($imageExts, $videoExts);
+$inboxFolder = $config['inboxFolder'] ?? '';
 
 // --- Shares ---
 $sharesFile = __DIR__ . '/shares.json';
@@ -464,6 +465,8 @@ foreach ($entries as $entry) {
     $entryPath = $fullPath . '/' . $entry;
 
     if (is_dir($entryPath)) {
+        // Hide the Inbox (staging area for auto-filing) from the gallery root
+        if (!$path && $inboxFolder && $entry === $inboxFolder) continue;
         $folders[] = $entry;
     } else {
         $ext = strtolower(pathinfo($entry, PATHINFO_EXTENSION));
