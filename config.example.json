@@ -13,12 +13,15 @@
     "group": "rpiGallery",
     "inboxFolder": "Inbox",
     "archiveNesting": ["Y", "Y-m"],
+    "timezone": "Europe/Prague",
+    "dataVersion": 8,
     "authSecret": "GENERATE_WITH_bin2hex_random_bytes_32",
     "azureBackup": {
         "connectionString": "DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net",
         "container": "archiv",
         "tier": "Archive",
-        "maxSizeMB": 1024
+        "maxSizeMB": 1024,
+        "backupIndex": true
     },
     "users": [
         {"user": "you@example.com", "password": "$2y$10$your-bcrypt-hash-here", "name": "Your Name", "initials": "YN", "uid": 1000}

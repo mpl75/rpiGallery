@@ -708,6 +708,22 @@ body {
     white-space: nowrap;
 }
 
+/* Merge dialog (reuses .share-dialog shell) */
+.merge-select {
+    width: 100%;
+    padding: 8px;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-size: 1rem;
+}
+
+.share-dialog-content p.merge-note {
+    font-size: 1rem;
+    color: var(--color-muted);
+}
+
 .share-close {
     padding: 8px;
     border: 1px solid var(--color-border);

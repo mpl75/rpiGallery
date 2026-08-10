@@ -28,21 +28,29 @@ $imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
 $videoExts = $config['videoExtensions'] ?? [];
 $allExts = array_merge($imageExts, $videoExts);
 
-// Initialize Azure backup if configured. Note: classStorage sets timezone to GMT
-// at file load (required for Azure auth signatures); leave it that way thereafter.
+// Initialize Azure backup if configured.
 $azureStorage = null;
 $azureContainer = null;
 $azureTier = 'Archive';
 $azureMaxSize = 0;
+$backupIndex = false;
 if (!empty($config['azureBackup']['connectionString'])) {
     require_once __DIR__ . '/classStorage/classStorage.php';
     $azureStorage = new Storage($config['azureBackup']['connectionString'], true);
     $azureContainer = $config['azureBackup']['container'] ?? 'archiv';
     $azureTier = $config['azureBackup']['tier'] ?? 'Archive';
     $azureMaxSize = (int)($config['azureBackup']['maxSizeMB'] ?? 0) * 1048576;
+    $backupIndex = $config['azureBackup']['backupIndex'] ?? true;
     // Idempotent: returns ContainerAlreadyExists error if it exists, that is fine
     $azureStorage->createContainer($azureContainer);
 }
+
+// Everything below formats local wall-clock times: video dates, album names, logs.
+// Pin the zone explicitly instead of inheriting whatever a library left behind --
+// classStorage still sets the process default to GMT when it loads, which is what made
+// videos come out 2 hours early. Safe to override since classStorage formats its own
+// Azure dates with gmdate(); the signatures no longer depend on the default.
+date_default_timezone_set($config['timezone'] ?? 'Europe/Prague');
 
 function backupContentType($name) {
     $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
@@ -133,8 +141,211 @@ function collectFolders($dir, $relative = '') {
     return $result;
 }
 
+// --- Move detection ---
+// A photo moved between albums (merging day-albums into one multi-day album) keeps its
+// name, size and mtime -- rename() preserves both, and so do Finder/SMB copies. That
+// triple is the identity used to recognise "this is the same file, just elsewhere", so
+// the existing thumbnail, fullsize preview and Azure backup can be reused instead of
+// regenerated and re-uploaded.
+
+function moveKey($name, $size, $mtime) {
+    return $name . '|' . (int)$size . '|' . (int)$mtime;
+}
+
+// Cheap content fingerprint (first 64 kB). Stored in data.json and compared on adoption
+// so a coincidental name+size+mtime match cannot attach the wrong thumbnail.
+function headHash($file) {
+    $fh = @fopen($file, 'rb');
+    if (!$fh) return null;
+    $buf = fread($fh, 65536);
+    fclose($fh);
+    return $buf === false ? null : md5($buf);
+}
+
+function dataJsonFiles() {
+    global $thumbsFolder;
+    if (!is_dir($thumbsFolder)) return [];
+    $out = [];
+    $it = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($thumbsFolder, FilesystemIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::SELF_FIRST
+    );
+    foreach ($it as $f) {
+        if ($f->getFilename() === 'data.json') $out[] = $f->getPathname();
+    }
+    return $out;
+}
+
+// Index every data.json entry whose source file is gone -- those are the only candidates
+// for a move. Two lookups are kept: by name+size+mtime (a plain move) and by content
+// fingerprint (a move that also renamed the file, e.g. around a name collision).
+// Keys claimed by more than one entry are ambiguous and dropped -- regenerating is
+// cheaper than attaching the wrong thumbnail.
+function buildMoveIndex() {
+    global $thumbsFolder, $rootGallery;
+    $records = [];
+    $byName = [];
+    $byContent = [];
+    $nameDup = [];
+    $contentDup = [];
+    $id = 0;
+
+    foreach (dataJsonFiles() as $djPath) {
+        $rel = trim(substr(dirname($djPath), strlen($thumbsFolder)), '/');
+        $data = json_decode(@file_get_contents($djPath), true);
+        if (!is_array($data)) continue;
+        foreach ($data as $name => $entry) {
+            if ($name === '' || $name[0] === '_' || !is_array($entry)) continue;
+            if (file_exists($rootGallery . ($rel ? '/' . $rel : '') . '/' . $name)) continue;
+
+            $records[++$id] = ['rel' => $rel, 'name' => $name, 'entry' => $entry];
+
+            $nk = moveKey($name, $entry['filesize'] ?? -1, $entry['mtime'] ?? 0);
+            if (isset($byName[$nk])) $nameDup[$nk] = true; else $byName[$nk] = $id;
+
+            if (!empty($entry['hash']) && !empty($entry['filesize'])) {
+                $ck = $entry['hash'] . '|' . (int)$entry['filesize'];
+                if (isset($byContent[$ck])) $contentDup[$ck] = true; else $byContent[$ck] = $id;
+            }
+        }
+    }
+    foreach (array_keys($nameDup) as $k) unset($byName[$k]);
+    foreach (array_keys($contentDup) as $k) unset($byContent[$k]);
+
+    return ['records' => $records, 'byName' => $byName, 'byContent' => $byContent];
+}
+
+// Which indexed entry does this file come from? Name+size+mtime first (with the
+// size-less fallback for entries predating 'filesize'), then the content fingerprint.
+// A name match whose stored fingerprint disagrees is rejected, not adopted.
+// Returns a record id for claimMove(), or null.
+function findMoveCandidate($index, $hash, $name, $size, $mtime) {
+    foreach ([moveKey($name, $size, $mtime), moveKey($name, -1, $mtime)] as $nk) {
+        if (!isset($index['byName'][$nk])) continue;
+        $id = $index['byName'][$nk];
+        if (!isset($index['records'][$id])) continue;
+        $stored = $index['records'][$id]['entry']['hash'] ?? null;
+        if ($stored && $hash !== null && $stored !== $hash) continue;
+        return $id;
+    }
+    if ($hash !== null) {
+        $ck = $hash . '|' . (int)$size;
+        if (isset($index['byContent'][$ck]) && isset($index['records'][$index['byContent'][$ck]])) {
+            return $index['byContent'][$ck];
+        }
+    }
+    return null;
+}
+
+// Consume a candidate so no second folder can adopt the same thumbnail
+function claimMove(&$index, $id) {
+    unset($index['records'][$id]);
+}
+
+// Reserve a thumbnail filename in the destination folder, suffixing on collision the
+// same way the generator does (two photos can share an EXIF second).
+function reserveMappedName($mapped, &$usedNames) {
+    if (!isset($usedNames[$mapped])) { $usedNames[$mapped] = true; return $mapped; }
+    $base = pathinfo($mapped, PATHINFO_FILENAME);
+    $ext  = pathinfo($mapped, PATHINFO_EXTENSION);
+    $i = 1;
+    do {
+        $cand = $base . '_' . $i . ($ext ? '.' . $ext : '');
+        $i++;
+    } while (isset($usedNames[$cand]));
+    $usedNames[$cand] = true;
+    return $cand;
+}
+
+function moveLog($status, $item, $detail = '') {
+    $line = sprintf("%s  %-4s  %s%s\n", date('Y-m-d H:i:s'), $status, $item, $detail ? "  $detail" : '');
+    @file_put_contents(__DIR__ . '/moves.log', $line, FILE_APPEND);
+}
+
+// --- Orphan sweep ---
+// Drops thumbnails, fullsize previews and data.json entries whose source file is gone.
+// The in-loop cleanup only reaches folders that still hold media, so an album emptied
+// out completely (merged elsewhere, or deleted) would otherwise keep its thumbnails
+// forever. Also removes stray files in the thumbnail/fullsize dirs that no data.json
+// entry points at. Runs only after a full, uninterrupted pass.
+function sweepOrphans() {
+    global $thumbsFolder, $fullsizeFolder, $rootGallery;
+    $removedFiles = 0;
+    $removedFolders = 0;
+
+    // Safety: never sweep against an archive that looks unmounted or unreadable.
+    if (!is_dir($rootGallery)) return [0, 0];
+    if (!array_diff(@scandir($rootGallery) ?: [], ['.', '..'])) return [0, 0];
+
+    foreach (dataJsonFiles() as $djPath) {
+        $rel = trim(substr(dirname($djPath), strlen($thumbsFolder)), '/');
+        $srcDir   = $rootGallery . ($rel ? '/' . $rel : '');
+        $thumbDir = dirname($djPath);
+        $fsDir    = $fullsizeFolder . ($rel ? '/' . $rel : '');
+
+        $data = json_decode(@file_get_contents($djPath), true);
+        if (!is_array($data)) continue;
+
+        $changed = false;
+        foreach ($data as $name => $entry) {
+            if ($name === '' || $name[0] === '_' || !is_array($entry)) continue;
+            if (file_exists($srcDir . '/' . $name)) continue;
+            $mapped = $entry['mappedName'] ?? $name;
+            if (file_exists($thumbDir . '/' . $mapped)) { @unlink($thumbDir . '/' . $mapped); $removedFiles++; }
+            if (file_exists($fsDir . '/' . $mapped))    { @unlink($fsDir . '/' . $mapped);    $removedFiles++; }
+            unset($data[$name]);
+            $changed = true;
+            moveLog('DROP', ($rel ? $rel . '/' : '') . $name, '(zdroj neexistuje)');
+        }
+
+        $hasMedia = false;
+        foreach ($data as $k => $v) {
+            if ($k !== '' && $k[0] !== '_') { $hasMedia = true; break; }
+        }
+
+        // Source album gone entirely -> drop its thumbnail/fullsize folders too
+        if (!$hasMedia && !is_dir($srcDir)) {
+            @unlink($djPath);
+            removeIfEmpty($thumbDir);
+            removeIfEmpty($fsDir);
+            $removedFolders++;
+            moveLog('DROP', $rel ?: '(root)', '(cela slozka)');
+            continue;
+        }
+
+        if ($changed) {
+            file_put_contents($djPath, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+        }
+
+        // Stray files nothing points at (left over from earlier renames/regenerations)
+        if ($hasMedia) {
+            $keep = ['data.json' => true];
+            foreach ($data as $k => $v) {
+                if ($k === '' || $k[0] === '_' || !is_array($v)) continue;
+                $keep[$v['mappedName'] ?? $k] = true;
+            }
+            foreach ([$thumbDir, $fsDir] as $dir) {
+                if (!is_dir($dir)) continue;
+                foreach (@scandir($dir) ?: [] as $f) {
+                    if ($f[0] === '.' || isset($keep[$f])) continue;
+                    if (is_dir($dir . '/' . $f)) continue;
+                    @unlink($dir . '/' . $f);
+                    $removedFiles++;
+                    moveLog('DROP', ($rel ? $rel . '/' : '') . $f, '(osirely soubor)');
+                }
+            }
+        }
+    }
+
+    return [$removedFiles, $removedFolders];
+}
+
 // Auto-file anything dropped into the Inbox before scanning (so new albums are included)
 processInbox();
+
+// Index of files that vanished from their album -- candidates for adoption below.
+// Built after the inbox pass so freshly filed photos are already in place.
+$moveIndex = buildMoveIndex();
 
 // Sort folders: newest first (by folder name, works for date-named folders)
 $allFolders = collectFolders($rootGallery);
@@ -167,6 +378,7 @@ writeStatus([
 $processedFolders = 0;
 $foldersWithNewFiles = 0;
 $totalNewFiles = 0;
+$adoptedFiles = 0;
 
 foreach ($allFolders as $relPath) {
     if (shouldStop()) {
@@ -214,6 +426,7 @@ foreach ($allFolders as $relPath) {
     $dataFile = $thumbDir . '/data.json';
     $data = [];
     $dataVersion = 0;
+    $displayName = null;
     if (file_exists($dataFile)) {
         $raw = json_decode(file_get_contents($dataFile), true) ?: [];
         $dataVersion = $raw['_version'] ?? 0;
@@ -234,6 +447,86 @@ foreach ($allFolders as $relPath) {
         }
     }
 
+    $dataChanged = false;
+
+    // Thumbnail names already taken in this folder (shared by the adoption pass below
+    // and the generator further down)
+    $usedNames = [];
+    foreach ($data as $k => $v) {
+        if (isset($v['mappedName'])) $usedNames[$v['mappedName']] = true;
+    }
+
+    // Adopt files that moved here from another album: relocate the existing thumbnail,
+    // fullsize preview and backup record instead of regenerating and re-uploading.
+    $carryBackup = [];
+    if ($toProcess && $moveIndex['records']) {
+        $stillToProcess = [];
+        foreach ($toProcess as $name) {
+            if (isset($data[$name])) { $stillToProcess[] = $name; continue; }
+
+            $srcFile  = $srcDir . '/' . $name;
+            $srcSize  = filesize($srcFile);
+            $srcMtime = filemtime($srcFile);
+            $srcHash  = headHash($srcFile);
+            $id = findMoveCandidate($moveIndex, $srcHash, $name, $srcSize, $srcMtime);
+            if ($id === null) { $stillToProcess[] = $name; continue; }
+
+            $cand     = $moveIndex['records'][$id];
+            $oldRel   = $cand['rel'];
+            $oldEntry = $cand['entry'];
+
+            // Backup record travels with the file: the blob keeps its original path
+            // (an Archive-tier blob cannot be moved server-side without rehydration),
+            // so remember where it actually lives. Entries predating backupBlob get it
+            // reconstructed from the folder they are leaving.
+            $backup = array_intersect_key($oldEntry, ['backedUp' => 1, 'backupSkipped' => 1, 'backupBlob' => 1]);
+            if (!empty($oldEntry['backedUp']) && empty($backup['backupBlob'])) {
+                $backup['backupBlob'] = ($oldRel ? $oldRel . '/' : '') . $cand['name'];
+            }
+
+            $oldMapped = $oldEntry['mappedName'] ?? $cand['name'];
+            $oldThumb  = $thumbsFolder   . ($oldRel ? '/' . $oldRel : '') . '/' . $oldMapped;
+            $oldFs     = $fullsizeFolder . ($oldRel ? '/' . $oldRel : '') . '/' . $oldMapped;
+
+            // Thumbnail missing or unmovable -> regenerate, but keep the backup record
+            // so the file is not uploaded to Azure a second time.
+            if (!file_exists($oldThumb)) {
+                claimMove($moveIndex, $id);
+                if ($backup) $carryBackup[$name] = $backup;
+                $stillToProcess[] = $name;
+                continue;
+            }
+
+            if (!is_dir($thumbDir)) mkdirShared($thumbDir);
+            $newMapped = reserveMappedName($oldMapped, $usedNames);
+            if (!@rename($oldThumb, $thumbDir . '/' . $newMapped)) {
+                unset($usedNames[$newMapped]);
+                claimMove($moveIndex, $id);
+                if ($backup) $carryBackup[$name] = $backup;
+                $stillToProcess[] = $name;
+                moveLog('FAIL', ($relPath ? $relPath . '/' : '') . $name, '(presun nahledu selhal)');
+                continue;
+            }
+
+            if (file_exists($oldFs)) {
+                if (!is_dir($fsDir)) mkdirShared($fsDir);
+                @rename($oldFs, $fsDir . '/' . $newMapped);
+            }
+
+            $entry = $oldEntry;
+            $entry['mtime']      = $srcMtime;
+            $entry['filesize']   = $srcSize;
+            $entry['mappedName'] = $newMapped;
+            if (!empty($backup['backupBlob'])) $entry['backupBlob'] = $backup['backupBlob'];
+            $data[$name] = $entry;
+            $dataChanged = true;
+            $adoptedFiles++;
+            claimMove($moveIndex, $id);
+            moveLog('MOVE', ($oldRel ? $oldRel . '/' : '') . $cand['name'], '-> ' . ($relPath ?: '(root)'));
+        }
+        $toProcess = $stillToProcess;
+    }
+
     // Files that need metadata refresh only (thumbnails exist)
     $toRefresh = [];
     if ($needsMetadataRefresh) {
@@ -245,9 +538,17 @@ foreach ($allFolders as $relPath) {
     }
 
     // Remove entries for deleted files
-    $dataChanged = false;
     foreach (array_keys($data) as $key) {
         if (!in_array($key, $mediaFiles)) {
+            // The file may have moved to an album not scanned yet (folders are walked
+            // newest-first, so the destination often comes later). Drop the entry but
+            // keep the thumbnail for the adoption pass; the orphan sweep collects
+            // whatever nobody claims.
+            if (findMoveCandidate($moveIndex, $data[$key]['hash'] ?? null, $key, $data[$key]['filesize'] ?? -1, $data[$key]['mtime'] ?? 0) !== null) {
+                unset($data[$key]);
+                $dataChanged = true;
+                continue;
+            }
             $oldMapped = $data[$key]['mappedName'] ?? $key;
             $t = $thumbDir . '/' . $oldMapped;
             if (file_exists($t)) unlink($t);
@@ -298,9 +599,10 @@ foreach ($allFolders as $relPath) {
                         if ($appleDate) {
                             $ts = strtotime($appleDate);
                         } else if ($creationTime) {
-                            $utc = new DateTime($creationTime, new DateTimeZone('UTC'));
-                            $utc->setTimezone(new DateTimeZone('Europe/Prague'));
-                            $ts = $utc->getTimestamp();
+                            // creation_time is UTC. getTimestamp() is an absolute point in
+                            // time -- converting the object's zone first would change
+                            // nothing; the local wall clock appears when $ts is formatted.
+                            $ts = (new DateTime($creationTime, new DateTimeZone('UTC')))->getTimestamp();
                         }
                     }
                 }
@@ -329,6 +631,8 @@ foreach ($allFolders as $relPath) {
             $data[$name]['owner'] = $owner;
             $data[$name]['type'] = $isVideo ? 'video' : 'image';
             $data[$name]['filesize'] = filesize($srcFile);
+            // Backfill the move-detection fingerprint for entries written before it existed
+            if (empty($data[$name]['hash'])) $data[$name]['hash'] = headHash($srcFile);
             $dataChanged = true;
         }
     }
@@ -340,11 +644,7 @@ foreach ($allFolders as $relPath) {
         if (!is_dir($thumbDir)) mkdirShared($thumbDir);
         if (!is_dir($fsDir)) mkdirShared($fsDir);
 
-        // Build used names map
-        $usedNames = [];
-        foreach ($data as $k => $v) {
-            if (isset($v['mappedName'])) $usedNames[$v['mappedName']] = true;
-        }
+        // $usedNames was built above, before the adoption pass
 
         $filesInFolder = count($toProcess);
         $filesDone = 0;
@@ -389,9 +689,10 @@ foreach ($allFolders as $relPath) {
                         if ($appleDate) {
                             $ts = strtotime($appleDate);
                         } else if ($creationTime) {
-                            $utc = new DateTime($creationTime, new DateTimeZone('UTC'));
-                            $utc->setTimezone(new DateTimeZone('Europe/Prague'));
-                            $ts = $utc->getTimestamp();
+                            // creation_time is UTC. getTimestamp() is an absolute point in
+                            // time -- converting the object's zone first would change
+                            // nothing; the local wall clock appears when $ts is formatted.
+                            $ts = (new DateTime($creationTime, new DateTimeZone('UTC')))->getTimestamp();
                         }
                     }
                 }
@@ -463,7 +764,13 @@ foreach ($allFolders as $relPath) {
                 'owner' => $owner,
                 'type' => $isVideo ? 'video' : 'image',
                 'filesize' => filesize($srcFile),
+                'hash' => headHash($srcFile),
             ];
+            // Recognised as a moved file whose thumbnail could not be relocated: keep the
+            // backup record so it is not uploaded to Azure again
+            if (isset($carryBackup[$name])) {
+                $data[$name] = array_merge($data[$name], $carryBackup[$name]);
+            }
             $dataChanged = true;
             $filesDone++;
 
@@ -517,6 +824,7 @@ foreach ($allFolders as $relPath) {
                     if (!empty($head['success']) && $existingSize === $size) {
                         backupLog('SKIP', $relBlob, '(already in Azure, ' . round($size / 1048576, 1) . ' MB)');
                         $data[$name]['backedUp'] = gmdate('Y-m-d\TH:i:s\Z');
+                        $data[$name]['backupBlob'] = $relBlob;
                         $dataChanged = true;
                         file_put_contents($dataFile, json_encode(['_version' => $currentVersion] + ($displayName ? ['_displayName' => $displayName] : []) + $data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
                         continue;
@@ -532,6 +840,7 @@ foreach ($allFolders as $relPath) {
             $elapsed = round(microtime(true) - $t0, 1);
             backupLog('OK', $relBlob, '(' . round($size / 1048576, 1) . ' MB, ' . $elapsed . 's)');
             $data[$name]['backedUp'] = gmdate('Y-m-d\TH:i:s\Z');
+            $data[$name]['backupBlob'] = $relBlob;
             $dataChanged = true;
             file_put_contents($dataFile, json_encode(['_version' => $currentVersion] + ($displayName ? ['_displayName' => $displayName] : []) + $data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
         }
@@ -541,8 +850,33 @@ foreach ($allFolders as $relPath) {
         file_put_contents($dataFile, json_encode(['_version' => $currentVersion] + ($displayName ? ['_displayName' => $displayName] : []) + $data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
     }
 
+    // Mirror the folder index to Azure under _index/ so a RAID loss does not take the
+    // blob-path -> album mapping with it. Kept out of the Archive tier: these are tiny,
+    // must stay readable, and an archived blob cannot be overwritten.
+    if ($azureStorage && $backupIndex && $dataChanged) {
+        $indexBlob = encodeBlobPath('_index/' . ($relPath ? $relPath . '/' : '') . 'data.json');
+        $r = $azureStorage->uploadContent($azureContainer, $indexBlob, file_get_contents($dataFile), 'application/json');
+        if (empty($r['success'])) {
+            backupLog('FAIL', '_index/' . ($relPath ? $relPath . '/' : '') . 'data.json', '(' . ($r['errorCode'] ?? 'unknown') . ', http ' . ($r['httpCode'] ?? '?') . ')');
+        }
+    }
+
     $processedFolders++;
 }
+
+// Only after a complete pass: a stopped run may not have adopted moved files yet, and
+// sweeping then would throw away thumbnails that are about to find their new album.
+writeStatus([
+    'state' => 'running',
+    'totalFolders' => $totalFolders,
+    'processedFolders' => $processedFolders,
+    'currentFolder' => 'úklid',
+    'foldersWithNewFiles' => $foldersWithNewFiles,
+    'totalNewFiles' => $totalNewFiles,
+    'adoptedFiles' => $adoptedFiles,
+]);
+
+[$sweptFiles, $sweptFolders] = sweepOrphans();
 
 writeStatus([
     'state' => 'done',
@@ -551,7 +885,14 @@ writeStatus([
     'currentFolder' => '',
     'foldersWithNewFiles' => $foldersWithNewFiles,
     'totalNewFiles' => $totalNewFiles,
+    'adoptedFiles' => $adoptedFiles,
+    'sweptFiles' => $sweptFiles,
+    'sweptFolders' => $sweptFolders,
 ]);
+
+if ($adoptedFiles || $sweptFiles || $sweptFolders) {
+    moveLog('====', "prevzato $adoptedFiles, smazano $sweptFiles souboru, $sweptFolders slozek");
+}
 
 if ($azureStorage) {
     backupLog('====', '----- crawler DONE -----');
@@ -584,12 +925,21 @@ function extractGps($rawExif) {
     return null;
 }
 
+// A filename carrying a date is the most reliable source for a video: it is already
+// local wall-clock time, so it needs no timezone conversion at all (unlike the UTC
+// creation_time from ffprobe). Checked before falling back to the container metadata.
 function videoDateFromFilename($filename) {
-    // Android: VID_20251013_130938378.mp4 -> local time 2025-10-13 13:09:38
-    if (preg_match('/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/', $filename, $m)) {
-        $dt = "$m[1]-$m[2]-$m[3] $m[4]:$m[5]:$m[6]";
-        $ts = strtotime($dt);
-        if ($ts && $m[1] >= 2000 && $m[1] <= 2099) return $ts;
+    $patterns = [
+        // Gallery's own convention, written by dateToFilename(): 2026-08-03_20-03-40.mp4
+        '/(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/',
+        // Android: VID_20251013_130938378.mp4 -> local time 2025-10-13 13:09:38
+        '/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/',
+    ];
+    foreach ($patterns as $re) {
+        if (!preg_match($re, $filename, $m)) continue;
+        if ($m[1] < 2000 || $m[1] > 2099) continue;
+        $ts = strtotime("$m[1]-$m[2]-$m[3] $m[4]:$m[5]:$m[6]");
+        if ($ts) return $ts;
     }
     return null;
 }

@@ -74,7 +74,7 @@ if (isset($_GET['action']) && !empty($_SESSION['authenticated'])) {
     header('Content-Type: application/json');
 
     // CSRF check for state-changing actions
-    $csrfActions = ['crawler-start', 'crawler-stop', 'share-create', 'rename-folder', 'hide-photo'];
+    $csrfActions = ['crawler-start', 'crawler-stop', 'share-create', 'rename-folder', 'hide-photo', 'merge-folder'];
     if (in_array($_GET['action'], $csrfActions)) {
         if (($_GET['csrf'] ?? '') !== $_SESSION['csrf']) {
             echo json_encode(['ok' => false, 'msg' => 'Neplatný CSRF token']);
@@ -151,8 +151,14 @@ if (isset($_GET['action']) && !empty($_SESSION['authenticated'])) {
                 echo json_encode(['ok' => false, 'msg' => 'Chybí parametry']);
                 exit;
             }
+            // The display name becomes a real directory name when cleanup.php applies it
+            if (strpbrk($newName, '/\\') !== false || $newName[0] === '.') {
+                echo json_encode(['ok' => false, 'msg' => 'Neplatný název']);
+                exit;
+            }
+            $rootReal = realpath($rootGallery);
             $folderReal = realpath($rootGallery . '/' . $folderPath);
-            if (!$folderReal || strpos($folderReal, realpath($rootGallery)) !== 0 || $folderReal === realpath($rootGallery)) {
+            if (hasTraversal($folderPath) || !pathWithin($folderReal, $rootReal) || $folderReal === $rootReal) {
                 echo json_encode(['ok' => false, 'msg' => 'Neplatná cesta']);
                 exit;
             }
@@ -174,8 +180,9 @@ if (isset($_GET['action']) && !empty($_SESSION['authenticated'])) {
                 echo json_encode(['ok' => false, 'msg' => 'Chybí název souboru']);
                 exit;
             }
+            // Root album is legitimate here, so equality with thumbsFolder is allowed
             $djDir = realpath($thumbsFolder . ($photoFolder ? '/' . $photoFolder : ''));
-            if (!$djDir || strpos($djDir, realpath($thumbsFolder)) !== 0) {
+            if (hasTraversal($photoFolder) || !pathWithin($djDir, realpath($thumbsFolder))) {
                 echo json_encode(['ok' => false, 'msg' => 'Neplatná cesta']);
                 exit;
             }
@@ -192,6 +199,37 @@ if (isset($_GET['action']) && !empty($_SESSION['authenticated'])) {
             $djData[$photoName]['hidden'] = date('Y-m-d');
             file_put_contents($djPath, json_encode($djData, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
             echo json_encode(['ok' => true]);
+            exit;
+
+        case 'merge-folder':
+            if (empty($_SESSION['admin'])) { echo json_encode(['ok' => false]); exit; }
+            $srcRel = trim($_GET['folder'] ?? '', '/');
+            $dstRel = trim($_GET['target'] ?? '', '/');
+            if (!$srcRel || !$dstRel || $srcRel === $dstRel) {
+                echo json_encode(['ok' => false, 'msg' => 'Chybí parametry']);
+                exit;
+            }
+            $rootReal = realpath($rootGallery);
+            $srcReal  = realpath($rootGallery . '/' . $srcRel);
+            $dstReal  = realpath($rootGallery . '/' . $dstRel);
+            // pathWithin($dstReal, $srcReal) also covers "same album via a symlink"
+            if (hasTraversal($srcRel) || hasTraversal($dstRel)
+                || !pathWithin($srcReal, $rootReal) || !pathWithin($dstReal, $rootReal)
+                || $srcReal === $rootReal || $dstReal === $rootReal
+                || pathWithin($dstReal, $srcReal)) {
+                echo json_encode(['ok' => false, 'msg' => 'Neplatná cesta']);
+                exit;
+            }
+            // The crawler rewrites data.json under us -- refuse to merge mid-scan
+            $crawlerPid = __DIR__ . '/crawler.pid';
+            if (file_exists($crawlerPid)) {
+                $cp = (int)file_get_contents($crawlerPid);
+                if ($cp && posix_kill($cp, 0)) {
+                    echo json_encode(['ok' => false, 'msg' => 'Crawler právě běží, počkej na dokončení']);
+                    exit;
+                }
+            }
+            echo json_encode(mergeAlbum($srcRel, $dstRel), JSON_UNESCAPED_UNICODE);
             exit;
     }
 }
@@ -623,6 +661,17 @@ if ($path) {
     }
 }
 
+// Sibling albums this folder can be merged into (admin action)
+$mergeTargets = [];
+if ($path && !$isSharedAccess && !empty($_SESSION['admin'])) {
+    foreach ($siblings as $s) {
+        if ($s === $currentName) continue;
+        $rel = $parentPath ? $parentPath . '/' . $s : $s;
+        if ($inboxFolder && ($rel === $inboxFolder || strpos($rel, $inboxFolder . '/') === 0)) continue;
+        $mergeTargets[] = ['path' => $rel, 'name' => getDisplayName($s, $rel, $thumbsFolder)];
+    }
+}
+
 // Check crawler status
 $crawlerRunning = false;
 $pidFile = __DIR__ . '/crawler.pid';
@@ -638,6 +687,149 @@ foreach ($mediaFiles as $name) {
 }
 
 // --- Functions ---
+
+// --- Path safety (shared by every path-taking API action) ---
+
+// True when $real is $rootReal itself or below it. Both sides get a trailing separator,
+// otherwise a sibling like "Archiv-jine" passes a plain prefix check against "Archiv".
+// Takes resolved realpath() results; false (non-existent path) is never "within".
+function pathWithin($real, $rootReal) {
+    if ($real === false || $rootReal === false) return false;
+    return strpos(rtrim($real, '/') . '/', rtrim($rootReal, '/') . '/') === 0;
+}
+
+// Relative paths from the client are also joined onto the thumbnail/fullsize trees, not
+// just onto rootGallery, so a realpath check on one of them is not enough -- reject any
+// ".." segment before the path is used at all.
+function hasTraversal($rel) {
+    return in_array('..', explode('/', $rel), true);
+}
+
+// Pick a free filename in a target set, suffixing "_1", "_2", ... before the extension.
+function freeName($name, $taken) {
+    if (!isset($taken[$name])) return $name;
+    $base = pathinfo($name, PATHINFO_FILENAME);
+    $ext  = pathinfo($name, PATHINFO_EXTENSION);
+    $i = 1;
+    do {
+        $cand = $base . '_' . $i . ($ext ? '.' . $ext : '');
+        $i++;
+    } while (isset($taken[$cand]));
+    return $cand;
+}
+
+// Merge one album into another: moves the originals, the thumbnails and the fullsize
+// previews, and carries each data.json entry over -- including its Azure backup record,
+// so nothing is regenerated or uploaded twice. Entries whose thumbnail cannot be moved
+// are deliberately left behind in the source data.json: the crawler's move detection
+// then adopts them on the next run (regenerating the thumbnail, keeping the backup).
+// Leftover thumbnail folders are cleaned up by the crawler's orphan sweep.
+function mergeAlbum($srcRel, $dstRel) {
+    global $rootGallery, $thumbsFolder, $fullsizeFolder, $allExts;
+
+    $srcDir = $rootGallery . '/' . $srcRel;
+    $dstDir = $rootGallery . '/' . $dstRel;
+    if (!is_dir($srcDir) || !is_dir($dstDir)) {
+        return ['ok' => false, 'msg' => 'Složka neexistuje'];
+    }
+    if (!is_writable($srcDir) || !is_writable($dstDir)) {
+        return ['ok' => false, 'msg' => 'Chybí práva zápisu do složky'];
+    }
+
+    // Subfolders would be orphaned by a media-only merge -- refuse rather than half-do it
+    foreach (@scandir($srcDir) ?: [] as $e) {
+        if ($e[0] === '.') continue;
+        if (is_dir($srcDir . '/' . $e)) {
+            return ['ok' => false, 'msg' => 'Složka obsahuje podsložky, ty sluč nejdřív'];
+        }
+    }
+
+    $srcThumbDir = $thumbsFolder . '/' . $srcRel;
+    $dstThumbDir = $thumbsFolder . '/' . $dstRel;
+    $srcFsDir    = $fullsizeFolder . '/' . $srcRel;
+    $dstFsDir    = $fullsizeFolder . '/' . $dstRel;
+
+    $srcJson = $srcThumbDir . '/data.json';
+    $dstJson = $dstThumbDir . '/data.json';
+    $srcRaw = file_exists($srcJson) ? (json_decode(file_get_contents($srcJson), true) ?: []) : [];
+    $dstRaw = file_exists($dstJson) ? (json_decode(file_get_contents($dstJson), true) ?: []) : [];
+
+    // Names already taken in the destination
+    $usedFiles = [];
+    foreach (@scandir($dstDir) ?: [] as $e) {
+        if ($e[0] !== '.') $usedFiles[$e] = true;
+    }
+    $usedMapped = [];
+    foreach ($dstRaw as $k => $v) {
+        if ($k === '' || $k[0] === '_' || !is_array($v)) continue;
+        if (isset($v['mappedName'])) $usedMapped[$v['mappedName']] = true;
+    }
+
+    if (!is_dir($dstThumbDir)) @mkdir($dstThumbDir, 0775, true);
+    if (!is_dir($dstFsDir)) @mkdir($dstFsDir, 0775, true);
+
+    $moved = 0;
+    $failed = 0;
+    $deferred = 0;
+
+    foreach (@scandir($srcDir) ?: [] as $name) {
+        if ($name[0] === '.') continue;
+        $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+        if (!in_array($ext, $allExts)) continue;
+
+        $newName = freeName($name, $usedFiles);
+        if (!@rename($srcDir . '/' . $name, $dstDir . '/' . $newName)) {
+            $failed++;
+            continue;
+        }
+        $usedFiles[$newName] = true;
+        $moved++;
+
+        $entry = (isset($srcRaw[$name]) && is_array($srcRaw[$name])) ? $srcRaw[$name] : null;
+        if (!$entry) continue; // not crawled yet -- the crawler will pick it up in place
+
+        $oldMapped = $entry['mappedName'] ?? $name;
+        $newMapped = freeName($oldMapped, $usedMapped);
+
+        if (!file_exists($srcThumbDir . '/' . $oldMapped)
+            || !@rename($srcThumbDir . '/' . $oldMapped, $dstThumbDir . '/' . $newMapped)) {
+            // Leave the entry in the source data.json; the crawler adopts it next run
+            $deferred++;
+            continue;
+        }
+        $usedMapped[$newMapped] = true;
+
+        if (file_exists($srcFsDir . '/' . $oldMapped)) {
+            @rename($srcFsDir . '/' . $oldMapped, $dstFsDir . '/' . $newMapped);
+        }
+
+        // The Azure blob keeps its original path (an Archive-tier blob cannot be moved
+        // server-side), so record where it actually lives before the album name is lost.
+        if (!empty($entry['backedUp']) && empty($entry['backupBlob'])) {
+            $entry['backupBlob'] = $srcRel . '/' . $name;
+        }
+        $entry['mappedName'] = $newMapped;
+        $dstRaw[$newName] = $entry;
+        unset($srcRaw[$name]);
+    }
+
+    file_put_contents($dstJson, json_encode($dstRaw, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+    if (is_dir($srcThumbDir)) {
+        file_put_contents($srcJson, json_encode($srcRaw, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+    }
+
+    // Only succeeds once the album really is empty
+    @rmdir($srcDir);
+
+    return [
+        'ok' => true,
+        'moved' => $moved,
+        'failed' => $failed,
+        'deferred' => $deferred,
+        'target' => $dstRel,
+    ];
+}
+
 function showLoginForm($error = false) {
 ?>
 <!DOCTYPE html>
@@ -733,6 +925,9 @@ function showLoginForm($error = false) {
         <?php if (!empty($_SESSION['admin']) && $path): ?>
             <button onclick="renameFolder()" class="btn">Přejmenovat</button>
         <?php endif; ?>
+        <?php if (!empty($_SESSION['admin']) && $path && $mediaFiles && $mergeTargets): ?>
+            <button onclick="openMergeDialog()" class="btn">Sloučit do</button>
+        <?php endif; ?>
 <?php endif; ?>
     </span>
 <?php if (!$isSharedAccess): ?>
@@ -752,6 +947,24 @@ function showLoginForm($error = false) {
         <button onclick="document.getElementById('share-dialog').style.display='none'" class="share-close">Zavřít</button>
     </div>
 </div>
+<?php if (!empty($_SESSION['admin']) && $path && $mediaFiles && $mergeTargets): ?>
+<!-- Merge dialog: move this album's contents into a sibling album -->
+<div id="merge-dialog" class="share-dialog" style="display:none">
+    <div class="share-dialog-content">
+        <p>Sloučit <strong><?= htmlspecialchars(getDisplayName(basename($path), $path, $thumbsFolder)) ?></strong> do:</p>
+        <select id="merge-target" class="merge-select">
+            <?php foreach ($mergeTargets as $t): ?>
+                <option value="<?= htmlspecialchars($t['path']) ?>"><?= htmlspecialchars($t['name']) ?></option>
+            <?php endforeach; ?>
+        </select>
+        <p class="merge-note">Přesunou se originály i oba náhledy. Nic se negeneruje znovu ani znovu nezálohuje.</p>
+        <div class="share-days">
+            <button onclick="doMerge()" class="share-days-btn">Sloučit</button>
+        </div>
+        <button onclick="document.getElementById('merge-dialog').style.display='none'" class="share-close">Zrušit</button>
+    </div>
+</div>
+<?php endif; ?>
 <?php endif; ?>
 </div>
 
@@ -1263,6 +1476,34 @@ function renameFolder(folder, currentName) {
                 window.location.reload();
             } else {
                 alert(d.msg || 'Chyba při přejmenování');
+            }
+        });
+}
+
+// Merge this album into a sibling album
+function openMergeDialog() {
+    document.getElementById('merge-dialog').style.display = 'flex';
+}
+
+function doMerge() {
+    const select = document.getElementById('merge-target');
+    const target = select.value;
+    if (!target) return;
+    const targetName = select.options[select.selectedIndex].text;
+    if (!confirm('Přesunout celý obsah této složky do "' + targetName + '"?')) return;
+    const btn = document.querySelector('#merge-dialog .share-days-btn');
+    btn.disabled = true;
+    btn.textContent = 'Přesouvám...';
+    fetch('?action=merge-folder&folder=<?= rawurlencode($path) ?>&target=' + encodeURIComponent(target) + '&csrf=' + encodeURIComponent(csrfToken))
+        .then(r => r.json())
+        .then(d => {
+            if (d.ok) {
+                if (d.failed) alert('Přesunuto ' + d.moved + ' souboru, ' + d.failed + ' se nepodarilo presunout.');
+                window.location = '<?= htmlspecialchars($baseUrl) ?>/' + target.split('/').map(encodeURIComponent).join('/');
+            } else {
+                btn.disabled = false;
+                btn.textContent = 'Sloučit';
+                alert(d.msg || 'Chyba při slučování');
             }
         });
 }

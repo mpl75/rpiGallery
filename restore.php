@@ -14,6 +14,10 @@
  *   1. rehydrate           (returns immediately; Azure rehydrates in up to 15 hours)
  *   2. status              (poll periodically until all rehydrated)
  *   3. download TARGET_DIR (saves files with original directory structure under TARGET_DIR)
+ *
+ * Blobs under the _index/ prefix are data.json mirrors, not photos: they stay outside the
+ * Archive tier and are downloadable right away. A photo merged into another album keeps
+ * its original blob path -- the _index/ copy records where it lives now (backupBlob).
  */
 
 require_once __DIR__ . '/classStorage/classStorage.php';
@@ -142,6 +146,12 @@ function cmdArchive($s, $c, $prefix) {
     foreach ($blobs as $b) {
         $name = $b['Name'];
         $tier = $b['Properties']['AccessTier'] ?? '';
+        // _index/ holds the data.json mirrors (blob path -> album mapping). They must stay
+        // readable and overwritable, so they never go to Archive.
+        if (strpos($name, '_index/') === 0) {
+            $skipped++;
+            continue;
+        }
         if ($tier === 'Archive') {
             $skipped++;
             continue;
