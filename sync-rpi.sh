@@ -34,6 +34,7 @@ rsync -rltv --delete $DRY \
   --exclude='.gitmodules' \
   --exclude='.claude/' \
   --exclude='CLAUDE.md' \
+  --exclude='INFRA.local.md' \
   --exclude='.DS_Store' \
   --exclude='sync-rpi.sh' \
   --exclude='*.bak' --exclude='*.bak-*' \
