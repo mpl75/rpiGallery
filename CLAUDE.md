@@ -18,7 +18,9 @@ Runs on a single Raspberry Pi behind Apache with PHP 7.4 — **write PHP 7.4-com
 - Source archive is a shared directory owned by a dedicated group with setgid, writable by both the human users and Apache. The crawler runs as the web user, never as root, and must not require it (see Photo Import)
 - Media originals live outside the repo; the repo mirrors 1:1 onto the web dir
 
-Host-specific details — actual hostnames, disk layout, group names, OS and kernel versions, service configuration and operational playbooks — are in **`INFRA.local.md`**, which is deliberately not in git and not deployed. Read it before touching anything on the machine itself.
+Host-specific details — actual hostnames, disk layout, group names, OS and kernel versions, service configuration and operational playbooks — are in **`INFRA.local.md`**, kept out of this repository (and out of the deploy) because it maps a real machine; it is versioned separately in a private repo and symlinked into the working tree. Read it before touching anything on the machine itself.
+
+`config.json` is server-authoritative and exists only on the Pi — there is deliberately no local copy to drift out of date. Use `config.example.json` for the structure.
 
 ## Deploy
 
